@@ -113,16 +113,18 @@ Check failed: (id2 >= mGemm1TacticCount && id2 < mGemm1TacticCount + mGemm2Tacti
 
 The silent corruption is that same defect without the bounds check.
 
-There is a **second, smaller effect** that is not fully explained: with the
-fused-MoE ops skipped but autotune otherwise enabled, corruption drops to 3/30
-and is always in the *first* iteration after startup, then never recurs.
-`--disable-flashinfer-autotune` also skips the dummy warmup forward and is the
-only setting measured at 0. Threading the attention backend's
-`on_after_cuda_graph_warmup` into the target-side autotune path (the
-speculative-draft path already does this as `post_warmup_hook`) did **not** fix
-it. Root cause still open — see [Open questions](#open-questions).
+Verified clean across 100+ long generations, on four separate server starts,
+after the fix.
 
-Verified clean across 78+ long generations after the fix.
+**A note on a hypothesis that did not survive.** Two patched builds that skipped
+only the fused-MoE ops (leaving autotune otherwise on) showed 3/24 and 3/30
+corrupt, always in the first iteration after startup, which looked like a second
+bug in autotune's dummy warmup forward. Re-running that arm with the supported
+CLI flags — `--flashinfer-autotune-skip-ops trtllm::fused_moe::gemm1
+trtllm::fused_moe::gemm2`, verified to tune zero fused-MoE entries — gave
+**0/30**. Combined, 6/54 versus 0/30 is Fisher exact p≈0.08, i.e. not
+significant. It is start-to-start variance, not a separate defect. Reported here
+because the intermediate numbers are in this repo's history.
 
 ### 3. The SM120 QSA compatibility patch
 
@@ -163,10 +165,14 @@ that make this model look fine when it is not.
 1024 output tokens, 256-token requests were 0/48 clean. Any probe under a few
 hundred tokens is not evidence of anything. Always gate on long generations.
 
-**Do not call `/flush_cache` twice around a generation.** That sequence on its
-own corrupts the mamba extra-buffer state and causes the same `!` collapse
-(2/8 in a controlled run), independently of the autotune bug. `bench.py`
-defeats the prefix cache with a per-request nonce instead.
+**Beware measuring a rate against a corrupting background.** On an early server
+whose background corruption rate was ~12%, a `flush_cache -> generate ->
+flush_cache -> generate` sequence measured 2/8 corrupt while three other
+orderings measured 0/8, which looked like a `/flush_cache` bug. Re-run on the
+fixed configuration, where the background rate is 0, all five orderings —
+including that one — measured **0/12**. There is no `/flush_cache` defect; the
+original signal was noise. `bench.py` still uses a per-request nonce rather than
+`/flush_cache` to defeat the prefix cache, which is simply cheaper.
 
 Also note **greedy is not bit-deterministic here** — repeated identical
 `temperature=0` requests return differently-worded answers, so exact-match
@@ -190,8 +196,6 @@ Useful `bench/bench.py` profiles: `speed`, `coding`, `thinking`, `agent`
 
 ## Open questions
 
-- Root cause of the residual first-iteration corruption when the autotune
-  warmup forward runs at all.
 - Whether a *correct* fused-MoE tactic exists that is also faster than the
   heuristic fallback, which would return the ~8%. The tactic id space being
   shape-dependent makes hand-pinning unsafe.

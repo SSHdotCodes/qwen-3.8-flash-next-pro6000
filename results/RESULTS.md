@@ -41,3 +41,18 @@ SGLang image `sha256:12d3392b...`, checkpoint `RadixArk/Qwen3.8-Flash-Next-NVFP4
 
 Corruption-rate gate for the shipped configuration: 0/24, 0/30, 0/24 and 0/18
 across separate server starts (`python3 bench/rate.py --iters N`).
+
+## Falsified hypotheses
+
+Two effects that looked like separate defects during investigation and did not
+survive re-testing on the fixed configuration. Recorded so nobody re-derives
+them from this repo's intermediate numbers.
+
+| hypothesis | original signal | re-test on fixed config | verdict |
+|---|---|---|---|
+| `/flush_cache` twice around a generation corrupts mamba state | 2/8 corrupt vs 0/8 for three other orderings | **0/12 for all five orderings**, including the suspect | noise against a ~12% corrupting background |
+| autotune's dummy warmup forward corrupts the first requests | 3/24 and 3/30, always iteration 0, on patched builds | **0/30** with `--flashinfer-autotune-skip-ops trtllm::fused_moe::gemm1 trtllm::fused_moe::gemm2` (zero fused-MoE entries tuned) | 6/54 vs 0/30, Fisher exact p≈0.08 — start-to-start variance |
+
+The lesson generalising from both: a corruption rate measured against a
+non-zero background rate attributes nothing. Get the background to zero first,
+then test one variable.

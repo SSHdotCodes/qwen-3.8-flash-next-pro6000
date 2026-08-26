@@ -224,9 +224,8 @@ def build_payload(profile_name, model, max_tokens, seed, temperature=0.0, nonce=
     messages = []
     if p.get("system"):
         messages.append({"role": "system", "content": p["system"]})
-    # A deterministic per-run nonce defeats radix prefix reuse without calling
-    # /flush_cache. Two flush_cache calls around a generation corrupt the mamba
-    # extra-buffer state and make the model emit \"!\" forever.
+    # A deterministic per-run nonce defeats radix prefix reuse without a
+    # /flush_cache round trip per run.
     prefix = "" if nonce == 0 else "[request %d]\n" % nonce
     messages.append({"role": "user", "content": prefix + p["prompt"]})
     payload = {
