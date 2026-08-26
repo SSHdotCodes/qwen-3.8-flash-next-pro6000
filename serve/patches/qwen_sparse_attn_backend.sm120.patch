@@ -1,0 +1,23 @@
+--- qwen_sparse_attn_backend.py
++++ qwen_sparse_attn_backend.py
+@@ -71,6 +71,20 @@
+     Classic flash_attn (FA2, Ampere/Hopper) is preferred when installed;
+     flash-attn-4's cute interface serves the same call shape on Blackwell.
+     """
++    # The pip flash-attn CUTE package bundled in the day-0 Qwen3.8 image
++    # dispatches the QSA fallback through its SM100 kernel on RTX Blackwell
++    # (SM120).  That kernel fails to compile for the packed QSA decode shape.
++    # SGLang ships its own SM120 FA4 dispatcher in this same image; route the
++    # fallback through that implementation on RTX Blackwell.
++    from sglang.srt.utils.common import is_sm120_supported
++
++    if is_sm120_supported():
++        from sglang.kernels.ops.attention.flash_attention_v4 import (
++            flash_attn_varlen_func as sglang_fa4_varlen_func,
++        )
++
++        return sglang_fa4_varlen_func
++
+     try:
+         from flash_attn import flash_attn_varlen_func
+ 
