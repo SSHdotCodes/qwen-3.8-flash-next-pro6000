@@ -15,7 +15,6 @@ IMAGE="${IMAGE:-lmsysorg/sglang@sha256:12d3392bdc8be8d35e9a95f191df6aef99c5114bd
 MODEL="${MODEL:-RadixArk/Qwen3.8-Flash-Next-NVFP4}"
 NAME="${NAME:-qwen38-flash-next-sglang}"
 PORT="${PORT:-30010}"
-HOST="${HOST:-127.0.0.1}"
 HF_CACHE="${HF_CACHE:-$HOME/models/huggingface}"
 QSA_PATCH="${QSA_PATCH:-$HERE/patches/qwen_sparse_attn_backend.py}"
 
@@ -37,8 +36,12 @@ MSG
   exit 1
 fi
 
+# No --network host on purpose. With it, SGLang's ZMQ IPC -- which carries
+# prompt and generated tokens in plaintext -- binds to the node IP and is
+# reachable from anything that can route to this host. Isolating the container
+# netns and publishing only to host loopback keeps that traffic internal.
 exec docker run --rm --name "$NAME" \
-  --gpus all --network host --ipc host --shm-size 32g \
+  --gpus all -p 127.0.0.1:$PORT:$PORT --ipc host --shm-size 32g \
   --security-opt no-new-privileges:true \
   -e HF_HOME=/root/.cache/huggingface \
   -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
@@ -50,6 +53,7 @@ exec docker run --rm --name "$NAME" \
     --tp 1 --trust-remote-code \
     --quantization modelopt_fp4 --fp4-gemm-backend flashinfer_cutlass \
     --context-length 262144 \
+    --max-total-tokens 262144 \
     --mem-fraction-static 0.98 \
     --page-size 64 \
     --chunked-prefill-size 4096 \
@@ -71,4 +75,4 @@ exec docker run --rm --name "$NAME" \
     --reasoning-parser auto \
     --sampling-defaults model \
     --stream-interval 4 \
-    --host "$HOST" --port "$PORT"
+    --host 0.0.0.0 --port "$PORT"

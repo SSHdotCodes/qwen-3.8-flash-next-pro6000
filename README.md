@@ -126,7 +126,38 @@ trtllm::fused_moe::gemm2`, verified to tune zero fused-MoE entries — gave
 significant. It is start-to-start variance, not a separate defect. Reported here
 because the intermediate numbers are in this repo's history.
 
-### 3. The SM120 QSA compatibility patch
+### 3. Pin `--max-total-tokens` to the context length
+
+With `--max-running-requests 1`, a single request can never exceed
+`--context-length`, so letting SGLang auto-size the KV pool larger than that
+buys nothing and costs activation headroom. Leaving it unpinned sized the pool
+to 330,944 tokens and left only 3.39 GB free, which OOMs on a long-context
+prefill:
+
+```
+Error in request: CUDA out of memory. Tried to allocate 608.00 MiB.
+GPU 0 has a total capacity of 94.94 GiB of which 572.38 MiB is free.
+```
+
+Pinning it to 262,144 restores **5.37 GB** of headroom. Verified afterwards on a
+150,820-token context with the cached-prefix extend pattern that triggered the
+failure.
+
+### 4. Container network isolation
+
+The launcher deliberately does **not** use `--network host`. SGLang's internal
+ZMQ sockets carry prompt and generated tokens in plaintext, and under host
+networking they bind to the node IP rather than loopback — reachable from
+anything that can route to the machine. On the deployment this repo came from,
+four ports were confirmed reachable from another host on the same private
+network while the HTTP API itself was correctly loopback-only.
+
+Isolating the container netns and publishing only `127.0.0.1:30010` keeps that
+traffic inside the container. The server binds `0.0.0.0` *inside* the container
+because Docker port publishing cannot reach a container-loopback bind; the `-p`
+binding is what restricts exposure.
+
+### 5. The SM120 QSA compatibility patch
 
 `serve/patches/qwen_sparse_attn_backend.sm120.patch` — 14 lines. The pinned
 day-0 image routes the QSA fallback through the pip `flash-attn` CUTE SM100
