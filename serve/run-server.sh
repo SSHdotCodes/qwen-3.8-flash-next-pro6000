@@ -63,7 +63,7 @@ exec docker run --rm --name "$NAME" \
     --mamba-ssm-dtype bfloat16 \
     --mamba-radix-cache-strategy extra_buffer \
     --mamba-track-interval 64 \
-    --max-mamba-cache-size 16 \
+    --max-mamba-cache-size 8 \
     --max-running-requests 1 \
     --cuda-graph-max-bs-decode 1 \
     --disable-flashinfer-autotune \

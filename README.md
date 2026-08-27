@@ -139,9 +139,23 @@ Error in request: CUDA out of memory. Tried to allocate 608.00 MiB.
 GPU 0 has a total capacity of 94.94 GiB of which 572.38 MiB is free.
 ```
 
-Pinning it to 262,144 restores **5.37 GB** of headroom. Verified afterwards on a
-150,820-token context with the cached-prefix extend pattern that triggered the
-failure.
+Pinning it to 262,144 restores **5.37 GB** of headroom — but that alone is
+**not sufficient**. At 195,776 tokens the MTP verify path still exhausted VRAM
+with 28 MB free and took the whole scheduler process down:
+
+```
+expandable_segments: memory mapping failed with OOM on device 0
+    while trying to map 20971520 bytes (free: 29753344, total: 101938167808)
+Scheduler hit an exception ... eagle_worker_v2.py:1225 forward_batch_generation
+```
+
+`--max-mamba-cache-size 16` costs 1.37 GB for slots that `--max-running-requests 1`
+can never use. Dropping it to **8** brings headroom to **5.82 GB**. (4 is
+rejected: `mamba_ratio=5` makes `max_num_reqs=0` and the server refuses to boot.)
+
+Verified after both changes: 260,028 tokens plain; 215,057 tokens with three
+images; and the cached-continuation shape that originally crashed, with
+579-token generations. Zero OOM events.
 
 ### 4. Container network isolation
 
