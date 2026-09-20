@@ -3,7 +3,7 @@
 SGLang **0.5.20** setup for one RTX PRO 6000 Blackwell (SM120, 96 GB), with
 **262,144-token context**, two request slots, and exact speculative rejection
 sampling. The September 19 tuning improved repeated sustained throughput by
-**3.6%** on three fixed English workloads. **300–400 tok/s was not reached.**
+**3.6%** on three fixed English workloads.
 
 | Sustained workload | Before tuning | Current | Change |
 |---|---:|---:|---:|

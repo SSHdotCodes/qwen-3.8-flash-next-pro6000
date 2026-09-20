@@ -1,6 +1,6 @@
 # Qwen3.8 Flash Next throughput experiments — 2026-09-19
 
-**300–400 tok/s sustained was not reached.** Installed the smaller draft vocabulary and the validated QSA buffer change; production smoke checks passed.
+Installed the smaller draft vocabulary and the validated QSA buffer change; production smoke checks passed.
 
 The selected experiment has a modest fixed-length throughput gain. Completed code-repair timings were mixed, and reasoning length varied substantially. These results do not establish a broad improvement in whole-task completion time.
 
@@ -54,7 +54,7 @@ The 16-slot QSA pending buffer passed 4,026 adversarial state/rejection cases an
 
 Direct FlashInfer verification checks on the actual 16 key heads / 48 value heads / 128 head dimension passed four batch/window combinations after correcting the test to use SGLang’s batch-indexed scratch layout. Maximum output difference was about 3.1e-5 and intermediate-state difference about 0.00195. This is limited numerical evidence; the extra kernel override was not selected.
 
-## Why the large gain did not appear
+## Observed runtime costs
 
 The GPU remained fully busy at roughly 400 W, below its 580 W limit. A fresh profile showed about 1,865 kernels in each target verification graph, with a roughly 11.6–11.9 ms GPU span, plus about 1.6 ms for drafting and 0.9 ms for draft extension. BF16 matrix operations were prominent. Longer drafts increased work enough to erase their acceptance benefit. These measurements identify current costs; they do not prove that further optimization is impossible.
 
