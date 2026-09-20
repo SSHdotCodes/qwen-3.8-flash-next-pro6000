@@ -1,0 +1,38 @@
+[
+  {
+    "batch": 1,
+    "width": 4,
+    "output_max_error": 3.814697265625e-06,
+    "output_rms_error": 3.4412792615512444e-08,
+    "scratch_max_error": 0.0009765625,
+    "output_match": true,
+    "scratch_match": true
+  },
+  {
+    "batch": 2,
+    "width": 4,
+    "output_max_error": 1.9073486328125e-06,
+    "output_rms_error": 1.2907585222876605e-08,
+    "scratch_max_error": 0.0009765625,
+    "output_match": true,
+    "scratch_match": true
+  },
+  {
+    "batch": 1,
+    "width": 6,
+    "output_max_error": 4.76837158203125e-07,
+    "output_rms_error": 2.4835269396561444e-09,
+    "scratch_max_error": 0.001953125,
+    "output_match": true,
+    "scratch_match": true
+  },
+  {
+    "batch": 2,
+    "width": 6,
+    "output_max_error": 3.0517578125e-05,
+    "output_rms_error": 1.597591534618914e-07,
+    "scratch_max_error": 0.001953125,
+    "output_match": true,
+    "scratch_match": true
+  }
+]

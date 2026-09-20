@@ -1,6 +1,5 @@
 [Unit]
-Description=Qwen3.8-Flash-Next NVFP4 with native 262K context
-Documentation=https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8-Flash-Next
+Description=Qwen3.8-Flash-Next SGLang 0.5.20, 262K context and exact MTP sampling
 After=docker.service network-online.target
 Requires=docker.service
 Wants=network-online.target
@@ -8,8 +7,9 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStartPre=-/usr/bin/docker rm -f qwen38-flash-next-sglang
-ExecStart=/usr/bin/docker run --rm --pull never --name qwen38-flash-next-sglang --gpus all --network host --ipc host --shm-size 32g --security-opt no-new-privileges:true --log-opt max-size=50m --log-opt max-file=3 -e HF_HOME=/root/.cache/huggingface -e TRANSFORMERS_CACHE=/root/.cache/huggingface -e TRITON_CACHE_DIR=/root/.cache/triton -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True -v %h/models/huggingface:/root/.cache/huggingface -v %h/.cache/sglang-flash-next/triton:/root/.cache/triton -v %h/qwen-3.8-flash-next-pro6000/serve/patches/qwen_sparse_attn_backend.py:/sgl-workspace/sglang/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py:ro lmsysorg/sglang@sha256:12d3392bdc8be8d35e9a95f191df6aef99c5114bdbefd41bfdc7e760e6d25ec1 python3 -m sglang.launch_server --model-path RadixArk/Qwen3.8-Flash-Next-NVFP4 --served-model-name qwen3.8-flash-next --tp 1 --trust-remote-code --quantization modelopt_fp4 --fp4-gemm-backend flashinfer_cutlass --context-length 262144 --mem-fraction-static 0.98 --page-size 64 --chunked-prefill-size 4096 --ple-offload-embedding --linear-attn-prefill-backend triton --linear-attn-decode-backend flashinfer --mamba-ssm-dtype bfloat16 --mamba-radix-cache-strategy extra_buffer --mamba-track-interval 64 --max-mamba-cache-size 16 --max-running-requests 1 --cuda-graph-max-bs-decode 1 --disable-flashinfer-autotune --speculative-algorithm NEXTN --speculative-draft-model-path RadixArk/Qwen3.8-Flash-Next-NVFP4 --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --reasoning-parser auto --sampling-defaults model --stream-interval 4 --host 127.0.0.1 --port 30010
+Environment=DOCKER_HOST=unix://%t/docker.sock
+WorkingDirectory=%h/qwen-3.8-flash-next-pro6000
+ExecStart=%h/qwen-3.8-flash-next-pro6000/serve/run-server.sh
 ExecStop=/usr/bin/docker stop -t 60 qwen38-flash-next-sglang
 Restart=on-failure
 RestartSec=10

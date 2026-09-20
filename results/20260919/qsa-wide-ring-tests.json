@@ -1,0 +1,15 @@
+{
+  "original_four_slot_ring": {
+    "passed": 16,
+    "failed": 248
+  },
+  "wide_ring": {
+    "passed": 4026,
+    "failed": 0
+  },
+  "cuda_graph": {
+    "replays": 48,
+    "rows_per_replay": 32,
+    "passed": true
+  }
+}

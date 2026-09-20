@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Degeneration-rate probe. No /flush_cache (that itself corrupts state);
-uses a per-iteration nonce to defeat radix prefix reuse."""
+"""Legacy greedy degeneration probe. Uses a nonce to defeat prefix reuse.
+This heuristic is not a comprehensive correctness test or sampled benchmark.
+The earlier /flush_cache corruption hypothesis was not reproduced.
+"""
 import argparse, json, sys, time, urllib.request
 
 PROMPTS = {

@@ -1,3 +1,8 @@
+> **Historical greedy measurements (August 2026).** Current recommended-sampling
+> results and their limitations are in [20260919/REPORT.md](20260919/REPORT.md).
+> The original autotune causal diagnosis below was superseded by later QSA and
+> proposal-buffer findings; these files remain an experiment record.
+
 # Raw measurements
 
 All runs: single request, `temperature=0`, RTX PRO 6000 Blackwell (SM120, 96 GB),

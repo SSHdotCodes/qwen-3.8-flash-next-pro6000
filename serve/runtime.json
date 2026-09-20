@@ -1,0 +1,77 @@
+{
+  "release": "0.5.20-pro6000-20260919-hotmap",
+  "sglang_version": "0.5.20",
+  "base_image": "lmsysorg/sglang@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f",
+  "measured_local_image_digest": "sha256:a2198845e5f69cf887d3bcccf6dacb5962a77c493cb3eae68a61357a1c67ef9b",
+  "model": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+  "model_revision": "7b719225242aacd3dbd3f9407468c2ee9a9d2594",
+  "packages": {
+    "sglang": "0.5.20",
+    "torch": "2.13.0+cu130",
+    "sglang-kernel": "0.4.7",
+    "flashinfer-python": "0.6.18",
+    "nvidia-nccl-cu13": "2.29.7",
+    "protobuf": "6.33.6",
+    "grpcio-tools": "1.81.1",
+    "typeguard": "4.6.0",
+    "pillow": "11.3.0",
+    "opencv-python": "5.0.0.93"
+  },
+  "files": [
+    {
+      "path": "sglang/srt/layers/attention/qwen_sparse_attn_backend.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py",
+      "sha256": "1303c1ab3d1abe34419ab1f86a16f839b46e4abc48d2c4aaf9839e067d99e363"
+    },
+    {
+      "path": "sglang/srt/layers/attention/qsa/sparse_attn.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qsa/sparse_attn.py",
+      "sha256": "b214690392b16815590ab6aa4652c0cda3a559c86787b5928959f461c3c83280"
+    },
+    {
+      "path": "sglang/srt/models/qwen4_exp_mtp.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp_mtp.py",
+      "sha256": "154546d113de8533854f64d3a492c14d07bcf90432e70c6fe301b0351c2f4a1c"
+    },
+    {
+      "path": "sglang/srt/model_loader/loader.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/model_loader/loader.py",
+      "sha256": "4478a3deb4c0f8022033447896b280450f8b07623df8781ee7a6492b8bf6600e"
+    },
+    {
+      "path": "sglang/srt/models/qwen4_exp.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py",
+      "sha256": "17499efd37a3f44bed1408b7724de8c88d75516dabbe48d67dc73480faca7ddb"
+    },
+    {
+      "path": "sglang/srt/speculative/eagle_worker_v2.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/speculative/eagle_worker_v2.py",
+      "sha256": "e1e6a9c059aab5eaa2fe16d25d9adc7dae2f3c1d3b2bc492aa731fdd073d4370"
+    },
+    {
+      "path": "sglang/srt/layers/attention/qsa/metadata.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qsa/metadata.py",
+      "sha256": "dcc12d7a4525acc587261a56bc634a4063b2f860231487526ebd0c358b5b6984"
+    },
+    {
+      "path": "sglang/srt/layers/attention/qsa/graph_metadata.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qsa/graph_metadata.py",
+      "sha256": "710d9e79dc7fbe88cb1060165740bce3d4bc6fcd3bcb42f3e1d0e71b28d85dea"
+    },
+    {
+      "path": "sglang/srt/layers/attention/qsa/qsa_indexer.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qsa/qsa_indexer.py",
+      "sha256": "80717f165c70f328aab9b96b04e701811b2db3dbe17c505344e609f62464ec7d"
+    },
+    {
+      "path": "sglang/srt/mem_cache/qsa_kv_pool.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/mem_cache/qsa_kv_pool.py",
+      "sha256": "f352a79a36f04721d8702700555407a4808d86498378c6ac092d0aada546f431"
+    },
+    {
+      "path": "hot-token-ids.json",
+      "container_path": "/opt/qwen-mtp-hotmap.json",
+      "sha256": "8a4f4c7c5905b76861a62befa1e060e16362e1775087fbb78e907fd85c4c9c12"
+    }
+  ]
+}

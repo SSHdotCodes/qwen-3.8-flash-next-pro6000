@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!overlays/
+!overlays/**
+!runtime.json
+!verify-runtime.py

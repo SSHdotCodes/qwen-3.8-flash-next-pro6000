@@ -1,6 +1,8 @@
-# Generated from the pinned image by serve/patches/build-qsa-patch.sh
+# Legacy generated patch files; current runtime sources are tracked in serve/overlays.
 serve/patches/qwen_sparse_attn_backend.py
 serve/patches/*.orig
 serve/patches/*.rej
 __pycache__/
 *.pyc
+results/local/
+.venv/

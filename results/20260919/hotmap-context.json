@@ -1,0 +1,62 @@
+[
+  {
+    "prompt_tokens": 8336,
+    "completion_tokens": 178,
+    "ttft_s": 0.8993580089882016,
+    "elapsed_s": 1.6244595809839666,
+    "decode_tok_s": 244.10373227136486,
+    "prefill_tok_s": 9268.833897835848,
+    "content": "\n\n{\n  \"owner\": \"ZEPHYR-7381\",\n  \"budget\": \"46129\",\n  \"region\": \"EAST-704\"\n}",
+    "reasoning": "We need answer user's request. Need extract three AUTHORITATIVE_LEDGER values exactly from noisy ledger. They provided:\nAUTHORITATIVE_LEDGER owner=ZEPHYR-7381\n...\nAUTHORITATIVE_LEDGER budget=46129\n...\nAUTHORITATIVE_LEDGER region=EAST-704\nNeed return JSON object with just owner, budget, region; string values. Need likely {\"owner\":\"ZEPHYR-7381\",\"budget\":\"46129\",\"region\":\"EAST-704\"}. Ensure only JSON. Final concise.\n",
+    "finish_reason": "stop",
+    "collapse": false,
+    "chunks": 21,
+    "size_words": 8192,
+    "expected": {
+      "owner": "ZEPHYR-7381",
+      "budget": "46129",
+      "region": "EAST-704"
+    },
+    "semantic_pass": true
+  },
+  {
+    "prompt_tokens": 120144,
+    "completion_tokens": 243,
+    "ttft_s": 8.180860071995994,
+    "elapsed_s": 9.237068479997106,
+    "decode_tok_s": 229.12144816001623,
+    "prefill_tok_s": 14685.986429625713,
+    "content": "\n\n{\n  \"owner\": \"ZEPHYR-7381\",\n  \"budget\": \"46129\",\n  \"region\": \"EAST-704\"\n}",
+    "reasoning": "We need answer user's request. Need read noisy ledger, extract three AUTHORITATIVE_LEDGER values exactly. User says: \"Return a JSON object with just owner, budget, and region; use string values. Do not infer values from other words.\"\n\nWe need identify lines:\nAUTHORITATIVE_LEDGER owner=ZEPHYR-7381\n request ... (huge noisy) then later\nAUTHORITATIVE_LEDGER budget=46129\n capacity ... huge ...\nAUTHORITATIVE_LEDGER region=EAST-704\n billing ...\n\nNeed return JSON object just owner, budget, region; string values. So {\"owner\":\"ZEPHYR-7381\",\"budget\":\"46129\",\"region\":\"EAST-704\"}.\n\nNeed ensure no inferred. final only JSON. Need maybe analysis in same language? User English. Need final JSON. Ensure no extra.\n",
+    "finish_reason": "stop",
+    "collapse": false,
+    "chunks": 11,
+    "size_words": 120000,
+    "expected": {
+      "owner": "ZEPHYR-7381",
+      "budget": "46129",
+      "region": "EAST-704"
+    },
+    "semantic_pass": true
+  },
+  {
+    "prompt_tokens": 240144,
+    "completion_tokens": 283,
+    "ttft_s": 18.46407790700323,
+    "elapsed_s": 19.742886863998137,
+    "decode_tok_s": 220.51769223033594,
+    "prefill_tok_s": 13006.010980321736,
+    "content": "\n\n{\n  \"owner\": \"ZEPHYR-7381\",\n  \"budget\": \"46129\",\n  \"region\": \"EAST-704\"\n}",
+    "reasoning": "We need answer user's request. Need extract three AUTHORITATIVE_LEDGER values exactly from noisy text. They ask Return JSON object with just owner, budget, and region; use string values. Do not infer values from other words.\n\nNeed parse given text: Contains:\nrequest network capacity timeout ... (long)\nAUTHORITATIVE_LEDGER owner=ZEPHYR-7381\n cache project storage table ... huge\nAUTHORITATIVE_LEDGER budget=46129\n owner worker ... huge\nAUTHORITATIVE_LEDGER region=EAST-704\n billing table ... huge\n\nNeed output JSON object: {\"owner\":\"ZEPHYR-7381\",\"budget\":\"46129\",\"region\":\"EAST-704\"} exactly as strings. Ensure no markdown? likely just JSON. Need final.\n\nDouble-check exact values:\nAUTHORITATIVE_LEDGER owner=ZEPHYR-7381\nAUTHORITATIVE_LEDGER budget=46129\nAUTHORITATIVE_LEDGER region=EAST-704\n\nReturn JSON only.\n",
+    "finish_reason": "stop",
+    "collapse": false,
+    "chunks": 18,
+    "size_words": 240000,
+    "expected": {
+      "owner": "ZEPHYR-7381",
+      "budget": "46129",
+      "region": "EAST-704"
+    },
+    "semantic_pass": true
+  }
+]

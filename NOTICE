@@ -1,0 +1,13 @@
+Qwen3.8-Flash-Next RTX PRO 6000 runtime configuration and measurements
+Copyright 2026 SSHdotCodes contributors
+
+serve/overlays/sglang contains modified SGLang 0.5.20 source, distributed
+under Apache-2.0. Upstream: https://github.com/sgl-project/sglang
+Modifications: SM120 QSA/FP8 handling, pending-ring storage and indexing,
+draft vocabulary selection, proposal-probability lifetime, and startup loading.
+See serve/runtime.json for the immutable base and installed file hashes.
+
+The numeric draft token map derives from the public hot_tokens_64k.pt artifact
+in https://github.com/gabrielolympie/sglang-flashnext-sm120 with all Qwen special
+IDs included. Provenance and source checksum: docs/runtime.md.
+No model weights are redistributed in this repository.

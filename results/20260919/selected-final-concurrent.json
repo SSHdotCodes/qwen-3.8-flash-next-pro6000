@@ -1,0 +1,32 @@
+[
+  {
+    "prompt_tokens": 24070,
+    "completion_tokens": 60,
+    "ttft_s": 2.178710920998128,
+    "elapsed_s": 2.5323850629793014,
+    "decode_tok_s": 166.8202251640457,
+    "prefill_tok_s": 11047.817206044418,
+    "content": "\n\nACCOUNT-9173",
+    "reasoning": "We need answer user's request. User wrote huge repetitions then: \"The verified account code is ACCOUNT-9173. Return only that code.\" Need output only ACCOUNT-9173. Need final only code. Ensure no extra.\n",
+    "finish_reason": "stop",
+    "collapse": false,
+    "chunks": 7,
+    "expected": "ACCOUNT-9173",
+    "semantic_pass": true
+  },
+  {
+    "prompt_tokens": 24070,
+    "completion_tokens": 101,
+    "ttft_s": 2.185378619993571,
+    "elapsed_s": 2.716089875000762,
+    "decode_tok_s": 188.42637885764285,
+    "prefill_tok_s": 11014.109765597876,
+    "content": "\n\nACCOUNT-9277",
+    "reasoning": "The user's message contains a very long repeated string \"Operations record.\" followed by a final instruction: \"The verified account code is ACCOUNT-9277. Return only that code.\"\n\nThis appears to be a test or prompt injection attempt where the message is filled with repetitive text. The final instruction asks me to return only \"ACCOUNT-9277\".\n\nI should simply follow the instruction at the end and return the code as requested.\n",
+    "finish_reason": "stop",
+    "collapse": false,
+    "chunks": 11,
+    "expected": "ACCOUNT-9277",
+    "semantic_pass": true
+  }
+]

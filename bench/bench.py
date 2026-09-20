@@ -1,3 +1,4 @@
+# Legacy greedy protocol; see sustained.py for current recommended sampling.
 #!/usr/bin/env python3
 """Speed + quality harness for the Qwen3.8-Flash-Next deployment.
 

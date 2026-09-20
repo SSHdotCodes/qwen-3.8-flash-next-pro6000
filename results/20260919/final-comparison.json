@@ -1,0 +1,131 @@
+{
+  "cells": [
+    {
+      "profile": "code",
+      "control_mean": 171.38656947722868,
+      "candidate_mean": 177.15492506928229,
+      "gain_percent": 3.365698729864608,
+      "control_n": 3,
+      "candidate_n": 3,
+      "control_values": [
+        171.2312430878348,
+        169.09285165638198,
+        173.83561368746928
+      ],
+      "candidate_values": [
+        183.7013456210463,
+        174.21441037420422,
+        173.54901921259636
+      ]
+    },
+    {
+      "profile": "agent",
+      "control_mean": 166.89281248091154,
+      "candidate_mean": 171.96182106332543,
+      "gain_percent": 3.037283935156676,
+      "control_n": 3,
+      "candidate_n": 3,
+      "control_values": [
+        166.24000508744703,
+        167.11277199788555,
+        167.32566035740209
+      ],
+      "candidate_values": [
+        170.34020553679713,
+        174.11047984014183,
+        171.4347778130373
+      ]
+    },
+    {
+      "profile": "prose",
+      "control_mean": 149.32877214224962,
+      "candidate_mean": 155.9147218177123,
+      "gain_percent": 4.410368866616632,
+      "control_n": 3,
+      "candidate_n": 3,
+      "control_values": [
+        145.5228608397626,
+        151.84550771583542,
+        150.61794787115082
+      ],
+      "candidate_values": [
+        156.366692996597,
+        155.85785125336156,
+        155.51962120317827
+      ]
+    },
+    {
+      "profile": "chinese",
+      "control_mean": 157.57437765606485,
+      "candidate_mean": 164.13369627388215,
+      "gain_percent": 4.162680960818532,
+      "control_n": 1,
+      "candidate_n": 3,
+      "control_values": [
+        157.57437765606485
+      ],
+      "candidate_values": [
+        161.20289444753814,
+        169.2257407819078,
+        161.97245359220054
+      ]
+    }
+  ],
+  "geomean_gain_percent": 3.602799850446825,
+  "bootstrap_interval_percent": [
+    2.3187021099999816,
+    5.0631731592045925
+  ],
+  "bootstrap_note": "Exploratory 95% bootstrap interval across these fixed workloads only; three observations per English cell and one Chinese control do not establish broad task performance.",
+  "quality": [
+    {
+      "completion_tokens": 9924,
+      "elapsed_s": 55.27976510502049,
+      "decode_tok_s": 179.90613098298388,
+      "finish_reason": "stop",
+      "task": "retry",
+      "tests_pass": true
+    },
+    {
+      "completion_tokens": 24631,
+      "elapsed_s": 138.46514676499646,
+      "decode_tok_s": 178.01098407702847,
+      "finish_reason": "stop",
+      "task": "migrate",
+      "tests_pass": true
+    }
+  ],
+  "control_quality": [
+    {
+      "completion_tokens": 3559,
+      "elapsed_s": 19.36645522498293,
+      "decode_tok_s": 184.84328876084248,
+      "finish_reason": "stop",
+      "task": "retry",
+      "tests_pass": true
+    },
+    {
+      "completion_tokens": 21489,
+      "elapsed_s": 125.52194619798684,
+      "decode_tok_s": 171.32374139988104,
+      "finish_reason": "stop",
+      "task": "migrate",
+      "tests_pass": true
+    }
+  ],
+  "gates": {
+    "geomean_gain_at_least_3_percent": true,
+    "bootstrap_lower_bound_positive": true,
+    "no_english_mean_regression": true,
+    "chinese_within_5_percent": true,
+    "completed_repairs": true,
+    "long_context": true,
+    "concurrent_requests": true,
+    "ring_tests": true,
+    "protected_config": true,
+    "sources_unchanged": true,
+    "no_obvious_collapse": true
+  },
+  "qualified": true,
+  "protected_config_differences": {}
+}
