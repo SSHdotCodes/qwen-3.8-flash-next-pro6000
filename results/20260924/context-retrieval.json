@@ -1,0 +1,62 @@
+[
+  {
+    "prompt_tokens": 8336,
+    "completion_tokens": 269,
+    "ttft_s": 0.6334680329309776,
+    "elapsed_s": 1.6155257490463555,
+    "decode_tok_s": 272.89638439999163,
+    "prefill_tok_s": 13159.30649480506,
+    "content": "\n\n{\n  \"owner\": \"ZEPHYR-7381\",\n  \"budget\": \"46129\",\n  \"region\": \"EAST-704\"\n}",
+    "reasoning": "We need answer user's request. Need extract three AUTHORITATIVE_LEDGER values exactly from noisy ledger. User gives text with three lines:\nAUTHORITATIVE_LEDGER owner=ZEPHYR-7381\n... then AUTHORITATIVE_LEDGER budget=46129\n... then AUTHORITATIVE_LEDGER region=EAST-704\n...\nReturn JSON object with just owner, budget, and region; use string values. Do not infer values from other words.\nNeed final only JSON probably. Need ensure exact values: owner \"ZEPHYR-7381\", budget \"46129\", region \"EAST-704\".\nNo other words? User says Return a JSON object. Could include just object. Need maybe no markdown. final:\n{\n  \"owner\": \"ZEPHYR-7381\",\n  \"budget\": \"46129\",\n  \"region\": \"EAST-704\"\n}\nNeed ensure budget string. Done.\n",
+    "finish_reason": "stop",
+    "collapse": false,
+    "chunks": 11,
+    "size_words": 8192,
+    "expected": {
+      "owner": "ZEPHYR-7381",
+      "budget": "46129",
+      "region": "EAST-704"
+    },
+    "semantic_pass": true
+  },
+  {
+    "prompt_tokens": 120144,
+    "completion_tokens": 300,
+    "ttft_s": 8.206737093045376,
+    "elapsed_s": 9.413831408019178,
+    "decode_tok_s": 247.7022684068307,
+    "prefill_tok_s": 14639.679404597166,
+    "content": "\n\n{\n  \"owner\": \"ZEPHYR-7381\",\n  \"budget\": \"46129\",\n  \"region\": \"EAST-704\"\n}",
+    "reasoning": "We need answer user's request. Need parse input: They provide a huge noisy ledger with embedded AUTHORITATIVE_LEDGER lines:\nAUTHORITATIVE_LEDGER owner=ZEPHYR-7381\n... huge ...\nAUTHORITATIVE_LEDGER budget=46129\n... huge ...\nAUTHORITATIVE_LEDGER region=EAST-704\n... huge ...\nNeed return JSON object with just owner, budget, region; use string values. Extract three AUTHORITATIVE_LEDGER values exactly. Likely owner: ZEPHYR-7381, budget: \"46129\", region: \"EAST-704\". Need ensure string values. No other text. Need final only JSON. Need maybe verify no tricky: \"Do not infer values from other words.\" There are three markers exactly. Values are after = until newline? They are owner=ZEPHYR-7381, budget=46129, region=EAST-704. Need output {\"owner\":\"ZEPHYR-7381\",\"budget\":\"46129\",\"region\":\"EAST-704\"}. Ensure valid JSON.\n",
+    "finish_reason": "stop",
+    "collapse": false,
+    "chunks": 17,
+    "size_words": 120000,
+    "expected": {
+      "owner": "ZEPHYR-7381",
+      "budget": "46129",
+      "region": "EAST-704"
+    },
+    "semantic_pass": true
+  },
+  {
+    "prompt_tokens": 240144,
+    "completion_tokens": 342,
+    "ttft_s": 18.490638068993576,
+    "elapsed_s": 19.949249883997254,
+    "decode_tok_s": 233.78392831621215,
+    "prefill_tok_s": 12987.328998813222,
+    "content": "\n\n{\n  \"owner\": \"ZEPHYR-7381\",\n  \"budget\": \"46129\",\n  \"region\": \"EAST-704\"\n}",
+    "reasoning": "We need answer user's request. Need extract three AUTHORITATIVE_LEDGER values exactly. User provided huge noisy ledger text, then markers:\nAUTHORITATIVE_LEDGER owner=ZEPHYR-7381\n ... huge text ...\nAUTHORITATIVE_LEDGER budget=46129\n ... huge text ...\nAUTHORITATIVE_LEDGER region=EAST-704\n ... huge text ...\nReturn JSON object with just owner, budget, and region; use string values. Do not infer values from other words.\n\nNeed produce final JSON only likely. Values exactly strings: \"ZEPHYR-7381\", \"46129\", \"EAST-704\". Need ensure no extra text. Need maybe JSON: {\"owner\":\"ZEPHYR-7381\",\"budget\":\"46129\",\"region\":\"EAST-704\"}.\n\nDouble-check no tricks. There are three AUTHORITATIVE_LEDGER lines. Owner value after owner= until newline? The noisy imported operations ledger contains many words; but AUTHORITATIVE_LEDGER owner=ZEPHYR-7381. Then later AUTHORITATIVE_LEDGER budget=46129. Then AUTHORITATIVE_LEDGER region=EAST-704. Requested return JSON object with just owner, budget, and region; use string values. So final.\n",
+    "finish_reason": "stop",
+    "collapse": false,
+    "chunks": 19,
+    "size_words": 240000,
+    "expected": {
+      "owner": "ZEPHYR-7381",
+      "budget": "46129",
+      "region": "EAST-704"
+    },
+    "semantic_pass": true
+  }
+]

@@ -768,7 +768,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
                     logits_output.next_token_logits, f"draft_forward step {i}"
                 )
                 if get_spec().speculative_use_rejection_sampling:
-                    probs, topk_p, topk_index = sample_draft_proposal(
+                    probs, topk_p, topk_index = _fast_draft_proposal(
                         logits_output.next_token_logits,
                         forward_batch.sampling_info.temperatures,
                     )
@@ -1118,7 +1118,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         # Selected-row top-k remains worker-owned for both graph and eager
         # paths; the graph runner only moves the row selection before lm_head.
         if get_spec().speculative_use_rejection_sampling:
-            ret_draft_probs, ret_topk_p, ret_topk_index = sample_draft_proposal(
+            ret_draft_probs, ret_topk_p, ret_topk_index = _fast_draft_proposal(
                 draft_logits_output.next_token_logits,
                 batch.sampling_info.temperatures,
             )
@@ -1704,3 +1704,13 @@ class EAGLEWorkerV2(BaseSpecWorker):
             )
         )
         return success, message
+
+
+def _fast_draft_proposal(next_token_logits: torch.Tensor, temperatures: torch.Tensor):
+    """sample_draft_proposal (q = softmax(logits / T), X ~ q) with qwenfast's multi-block softmax for the few
+    long vocabulary rows; the q returned is still exactly the distribution X was drawn from."""
+    from sglang.srt.qwenfast import fast_softmax
+
+    probs = fast_softmax(next_token_logits / temperatures)
+    topk_p, topk_index = fast_sample(probs, num_samples=1)
+    return probs, topk_p, topk_index

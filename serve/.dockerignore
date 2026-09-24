@@ -2,5 +2,7 @@
 !Dockerfile
 !overlays/
 !overlays/**
+!qwenfast/
+!qwenfast/**
 !runtime.json
 !verify-runtime.py

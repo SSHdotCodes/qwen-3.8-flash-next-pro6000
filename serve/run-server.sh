@@ -4,7 +4,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export DOCKER_HOST="${DOCKER_HOST:-unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock}"
-IMAGE="${IMAGE:-local/qwen-flash-next:0.5.20-20260919-hotmap}"
+IMAGE="${IMAGE:-local/qwen-flash-next:0.5.20-20260924-qwenfast}"
 NAME="${NAME:-qwen38-flash-next-sglang}"
 PORT="${PORT:-30010}"
 HF_CACHE="${HF_CACHE:-$HOME/models/huggingface}"

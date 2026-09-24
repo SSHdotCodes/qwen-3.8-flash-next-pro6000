@@ -2,27 +2,36 @@
 
 SGLang **0.5.20** setup for one RTX PRO 6000 Blackwell (SM120, 96 GB), with
 **262,144-token context**, two request slots, and exact speculative rejection
-sampling. The September 19 tuning improved repeated sustained throughput by
-**3.6%** on three fixed English workloads.
+sampling. The September 24 release adds CUDA kernels for the decode and verify
+steps. Sustained decode rose **15.6%**, from 160.5 to
+**185.5 tok/s** (an earlier run of the same protocol measured 13.2%). The checkpoint, quantization, KV cache, context,
+slots and sampling are unchanged.
 
-| Sustained workload | Before tuning | Current | Change |
+| Sustained workload | September 19 | **September 24** | Change |
 |---|---:|---:|---:|
-| Python cache implementation | 171.4 tok/s | 177.2 tok/s | +3.4% |
-| SQLite queue implementation | 166.9 tok/s | 172.0 tok/s | +3.0% |
-| Technical writing | 149.3 tok/s | 155.9 tok/s | +4.4% |
-| Chinese explanation/code | 157.6 tok/s | 164.1 tok/s | +4.2% |
+| Python cache implementation | 168.1 tok/s | **190.0 tok/s** | +13.0% |
+| SQLite queue implementation | 164.1 tok/s | **192.7 tok/s** | +17.4% |
+| Technical writing | 153.8 tok/s | **179.9 tok/s** | +17.0% |
+| Chinese explanation/code | 155.9 tok/s | **179.4 tok/s** | +15.1% |
 
-These are single-request means over **8,192 generated tokens**, including
-reasoning and excluding time to first token. Both sides used SGLang 0.5.20,
-`temperature=1.0`, `top_p=0.95`, `top_k=20`, and `xhigh` thinking. English cells
-have three observations per configuration; Chinese has one control and three
-candidate observations. This is a small fixed workload sample.
+Both images ran on the same day, one after the other, with the same launcher
+and protocol: single requests of **8,192 generated tokens** including reasoning,
+excluding time to first token, `temperature=1.0`, `top_p=0.95`, `top_k=20`,
+`xhigh` thinking, three runs per workload. Per-request rates move with how many
+draft tokens the sampled text accepts. Verify steps per second, the steadier
+measure, rose from 68.1 to 79.1 (+16.2%), at unchanged acceptance.
+GSM8K scored 0.9688 against 0.9665 before (greedy, all 1,319) and 0.990 on both
+(thinking, 200 questions). Retrieval at 240K tokens and two concurrent 24K
+requests pass. See the [report and raw results](results/20260924/REPORT.md).
 
-Two completed code repairs passed all nine executable checks. The selected
-configuration generated at **178–180 tok/s**, but both candidate wall times
-were longer in those samples because reasoning lengths changed. Token rate
-alone does not establish faster task completion. See the
-[full report and raw evidence](results/20260919/REPORT.md).
+The kernels replace SGLang paths for 1–8-token batches: an NVFP4 MoE for decode,
+small-row BF16 GEMMs, fused hyper-connections, the GDN output projection, and a
+sparse verify sampler that gave the same accepted tokens as the dense path in
+12,000 of 12,000 randomized cases. They are compiled into the image from source.
+`QWENFAST=0` turns off the SGLang replacements. See the [runtime notes](docs/runtime.md#decode-kernels-2026-09-24).
+
+The September 19 tuning (draft hot-token map and a wider QSA ring) had improved
+the same workloads by 3.6%; its [report](results/20260919/REPORT.md) is kept.
 
 The previous **180–226 tok/s** headline used short, mostly non-thinking,
 **greedy** requests and a different runtime configuration. Those historical
@@ -88,9 +97,10 @@ networking. Use an authenticated proxy before offering inference remotely.
 | Linear attention | Triton prefill/verification; FlashInfer decode |
 | Recurrent state | BF16, `extra_buffer`, track interval 64, cache size 14 |
 | Other retained settings | PLE CPU offload, page 64, prefill chunk 4,096, graph batch 2 |
+| Decode kernels | `qwenfast` for 1–8-token batches (SM120a); `QWENFAST=0` restores the stock SGLang paths (the draft head keeps its GEMM) |
 
-The September tuning preserved all precision and capacity settings on both
-sides of the comparison. Relative to the original August repo, the current
+The September 19 and 24 releases preserved all precision and capacity settings
+on both sides of their comparisons. Relative to the original August repo, the current
 profile uses FP8 KV instead of BF16 KV and two slots instead of one; the
 historical speed figures must not be used as an unchanged-configuration baseline.
 
@@ -119,13 +129,18 @@ Floating-point behavior and sampled reasoning length can still vary.
 
 The [runtime notes](docs/runtime.md) describe the SM120 QSA/FP8 handling,
 **16-slot pending ring**, **proposal-probability clone fix**, indexed startup
-loading, and draft hot-token map. All eleven installed files match the
-workstation's verified production source hashes. Autotune stays enabled;
+loading, draft hot-token map and **decode kernels**. All thirteen overlay files
+and nine kernel sources match the workstation's verified production source
+hashes. The image compiles the kernels itself, so the library's bytes differ
+from the workstation build (the build path is embedded); the measurements above
+used the library this Dockerfile compiles. Autotune stays enabled;
 the old claim that it must always be disabled is superseded.
 
-The selected configuration passed retrieval checks at 8K, 120K and **240K**
-input tokens, two concurrent 24K requests, 4,026 adversarial ring cases and 48
-CUDA graph replays. Short retrieval responses are correctness evidence, not
+The September 24 runtime passed retrieval checks at 8K, 120K and **240K**
+input tokens and two concurrent 24K requests; the September 19 runtime also
+passed 4,026 adversarial ring cases and 48 CUDA graph replays. Kernel tests for
+the sampler, MoE, router, hyper-connections and GDN output run inside the image
+([results](results/20260924/kernel-tests)). Short retrieval responses are correctness evidence, not
 sustained throughput evidence. These checks are not a broad model-quality eval.
 
 ## Reproduce measurements

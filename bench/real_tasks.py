@@ -6,7 +6,7 @@ import requests
 from sustained import payload, request
 
 A = Path(__file__).resolve().parents[1] / "results/local"
-IMAGE = "local/qwen-flash-next:0.5.20-20260919-hotmap"
+IMAGE = "local/qwen-flash-next:0.5.20-20260924-qwenfast"
 TASKS = {
     "retry": """Implement a production-quality Python standard-library-only module for a HTTP client. Return exactly one Python code block containing the complete module. Public API:
 parse_retry_after(value: str | None, now: float) -> float | None: HTTP delta-seconds (nonnegative ASCII integer) or RFC HTTP date converted to seconds after the supplied Unix timestamp; past dates return 0. Invalid/negative/fractional values return None. Strip outer whitespace.

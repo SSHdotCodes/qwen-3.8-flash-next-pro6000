@@ -1,0 +1,29 @@
+{
+ "benchmark": "GSM8K through `python3 -m sglang.test.run_eval --eval-name gsm8k --api chat --num-threads 4` against the running server, same server arguments on both sides; non-thinking: max_tokens 2048, temperature 0, enable_thinking false; thinking: max_tokens 16384, temperature 1.0, top-p 0.95, top-k 20, reasoning_effort xhigh, --num-examples 200",
+ "results": [
+  {
+   "runtime": "2026-09-19 (before)",
+   "mode": "non-thinking, greedy, all 1,319 test questions",
+   "score": 0.9665144596651446,
+   "latency_s": 592.39
+  },
+  {
+   "runtime": "2026-09-24 (qwenfast)",
+   "mode": "non-thinking, greedy, all 1,319 test questions",
+   "score": 0.9687975646879756,
+   "latency_s": 584.21
+  },
+  {
+   "runtime": "2026-09-19 (before)",
+   "mode": "thinking xhigh, T 1.0 / top-p 0.95 / top-k 20, first 200 questions",
+   "score": 0.99,
+   "latency_s": 313.02
+  },
+  {
+   "runtime": "2026-09-24 (qwenfast)",
+   "mode": "thinking xhigh, T 1.0 / top-p 0.95 / top-k 20, first 200 questions",
+   "score": 0.99,
+   "latency_s": 300.25
+  }
+ ]
+}

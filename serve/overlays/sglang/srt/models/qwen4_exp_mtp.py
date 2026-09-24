@@ -84,8 +84,13 @@ class ShortlistDraftLogitsProcessor(LogitsProcessor):
             if key != self.hot_weight_key:
                 self.hot_weight = lm_head.weight.index_select(0, self.hot_ids).contiguous()
                 self.hot_weight_key = key
-            part = (torch.mm(h, self.hot_weight.T, out_dtype=torch.float32)
-                    if self.use_fp32_lm_head else torch.matmul(h, self.hot_weight.T))
+            part = None
+            if not self.use_fp32_lm_head:
+                from sglang.srt.qwenfast import hot_head
+                part = hot_head(h, self.hot_weight)
+            if part is None:
+                part = (torch.mm(h, self.hot_weight.T, out_dtype=torch.float32)
+                        if self.use_fp32_lm_head else torch.matmul(h, self.hot_weight.T))
             logits[:, self.hot_ids] = part
             return logits
         for lo, hi in ((0, self.cutoff), (248044, 248320)):

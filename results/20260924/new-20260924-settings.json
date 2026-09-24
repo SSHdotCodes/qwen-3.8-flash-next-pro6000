@@ -1,0 +1,12 @@
+{
+  "tag": "new-20260924",
+  "port": 30010,
+  "model": "qwen3.8-flash-next",
+  "runs": 3,
+  "tokens": 8192,
+  "profiles": "code,agent,prose,chinese",
+  "efforts": "xhigh",
+  "prefill": "",
+  "outdir": "results/20260924",
+  "flush_cache": true
+}

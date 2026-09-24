@@ -23,6 +23,15 @@ def verify(installed=False):
             raise ValueError(f"Runtime checksum mismatch: {path}")
         if path.suffix == ".py":
             ast.parse(data, filename=str(path))
+    kernels = manifest["qwenfast"]
+    for name, expected in kernels["sources"].items():
+        path = (
+            Path(kernels["source_dir"]) / name if installed else root / "qwenfast" / name
+        )
+        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            raise ValueError(f"Kernel source checksum mismatch: {path}")
+    if installed and not Path(kernels["library"]).is_file():
+        raise ValueError(f"Missing compiled kernels: {kernels['library']}")
     token_path = (
         Path("/opt/qwen-mtp-hotmap.json")
         if installed
@@ -42,7 +51,8 @@ def verify(installed=False):
             if actual != expected:
                 raise ValueError(f"{name}: expected {expected}, found {actual}")
     print(
-        f"Verified {len(manifest['files'])} runtime files and 65,800 draft IDs"
+        f"Verified {len(manifest['files'])} runtime files, {len(kernels['sources'])} kernel sources"
+        " and 65,800 draft IDs"
         + ("; installed package versions match" if installed else "")
     )
 

@@ -1,8 +1,8 @@
 {
-  "release": "0.5.20-pro6000-20260919-hotmap",
+  "release": "0.5.20-pro6000-20260924-qwenfast",
   "sglang_version": "0.5.20",
   "base_image": "lmsysorg/sglang@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f",
-  "measured_local_image_digest": "sha256:a2198845e5f69cf887d3bcccf6dacb5962a77c493cb3eae68a61357a1c67ef9b",
+  "measured_local_image_digest": "sha256:82f053fbd605f9fbfd4d6bd7c3e7b28a216e06ae600ae26e71be8eac58e827ac",
   "model": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
   "model_revision": "7b719225242aacd3dbd3f9407468c2ee9a9d2594",
   "packages": {
@@ -31,7 +31,7 @@
     {
       "path": "sglang/srt/models/qwen4_exp_mtp.py",
       "container_path": "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp_mtp.py",
-      "sha256": "154546d113de8533854f64d3a492c14d07bcf90432e70c6fe301b0351c2f4a1c"
+      "sha256": "67c8f5af3ccd5c6a027634164d7f71a3c53c18a4cc4c24dd7dda4ad38a14cbf5"
     },
     {
       "path": "sglang/srt/model_loader/loader.py",
@@ -41,12 +41,12 @@
     {
       "path": "sglang/srt/models/qwen4_exp.py",
       "container_path": "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py",
-      "sha256": "17499efd37a3f44bed1408b7724de8c88d75516dabbe48d67dc73480faca7ddb"
+      "sha256": "8086b6d7842433971d9f9036e068035ded6901cf649b89aacd1033037cdb5d7a"
     },
     {
       "path": "sglang/srt/speculative/eagle_worker_v2.py",
       "container_path": "/sgl-workspace/sglang/python/sglang/srt/speculative/eagle_worker_v2.py",
-      "sha256": "e1e6a9c059aab5eaa2fe16d25d9adc7dae2f3c1d3b2bc492aa731fdd073d4370"
+      "sha256": "15c7e15c9098b11ba7de43cfc062b017cbb7a3a2a1dc2fedde7224e9a054e94b"
     },
     {
       "path": "sglang/srt/layers/attention/qsa/metadata.py",
@@ -69,9 +69,35 @@
       "sha256": "f352a79a36f04721d8702700555407a4808d86498378c6ac092d0aada546f431"
     },
     {
+      "path": "sglang/srt/speculative/eagle_utils.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/speculative/eagle_utils.py",
+      "sha256": "ce0af241c13223c6204776d0e5aa1e277abcff1aaf701691b4a1631f5baa0534"
+    },
+    {
+      "path": "sglang/srt/qwenfast.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/qwenfast.py",
+      "sha256": "5f08dd0f3b2790b54ffcf2bb9d9f40ae955e0b52557519830326c54c44da87db"
+    },
+    {
       "path": "hot-token-ids.json",
       "container_path": "/opt/qwen-mtp-hotmap.json",
       "sha256": "8a4f4c7c5905b76861a62befa1e060e16362e1775087fbb78e907fd85c4c9c12"
     }
-  ]
+  ],
+  "qwenfast": {
+    "library": "/opt/qwenfast/qwenfast.so",
+    "source_dir": "/opt/qwenfast/src",
+    "nvcc_flags": "-O3 -gencode=arch=compute_120a,code=sm_120a --use_fast_math -lineinfo (torch.utils.cpp_extension, the image nvcc 13.0)",
+    "sources": {
+      "build_qf.py": "053e8c82246ac274919c7d686a1c72f818c5889884c07ac6743f78b60a36f64f",
+      "qf_bind.cpp": "5417e83eb9d207af1b2fbdc1ca53bb0aabc2acc6a646fb7deca5031288c8e88e",
+      "qf_gdnout.cu": "4c7f20eddcdee2f261f32515340f31d995777a79ae447529d9fe72fe6207f05e",
+      "qf_hc2.cu": "31e8c17ddf51314474f8d26c7a293106f9d689a0a67457f706de36d82c77d9f2",
+      "qf_hcmix.cu": "e1af7ba84e6185bbf483517aef83d6b46a50ce6b04ca8349d825cafe710a348f",
+      "qf_moe.cu": "158649bd31de55e60bcb170ccd1ac491e691e579ef8e4e35857099c1a4a75d08",
+      "qf_router.cu": "1ead41909d9bfdbdfa286dbb10de17664c81e2a5e85e1f9ba232050498787430",
+      "qf_sample.cu": "2b21eb8e087f74776a65bc2c4e804fa2e1e3dc3f1ff0371aecf953fd2066ea4a",
+      "qf_smallm.cu": "6e00558a1b70bd8384efa9936bc46fdb6c3a3026469edb37c4124fb0e5e4848b"
+    }
+  }
 }

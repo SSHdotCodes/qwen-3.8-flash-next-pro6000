@@ -71,6 +71,7 @@ from sglang.srt.models.qwen4_exp_ple_table import (
 )
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import logger
+import sglang.srt.qwenfast  # noqa: F401  decode-size kernel overrides
 
 # Decode/verify-sized batches only: at prefill sizes both chains are compute
 # bound and serializing them on one stream is faster than contending.

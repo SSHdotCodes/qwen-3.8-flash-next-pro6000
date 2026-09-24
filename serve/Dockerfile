@@ -10,10 +10,16 @@ RUN python3 -m pip uninstall -y nixl cosmos-guardrail && \
 
 COPY overlays/sglang/ /sgl-workspace/sglang/python/sglang/
 COPY overlays/hot-token-ids.json /opt/qwen-mtp-hotmap.json
+
+# Decode kernels (sglang/srt/qwenfast.py loads /opt/qwenfast/qwenfast.so): compiled here against the
+# image's PyTorch and CUDA 13.0 toolkit for SM120a; no GPU is needed to build.
+COPY qwenfast/ /opt/qwenfast/src/
+RUN cd /opt/qwenfast/src && MAX_JOBS=8 python3 build_qf.py && \
+    cp build_qf/qwenfast.so /opt/qwenfast/qwenfast.so
 COPY runtime.json verify-runtime.py /opt/flash-next/
 RUN python3 /opt/flash-next/verify-runtime.py --installed
 
 ARG RUNTIME_MANIFEST_SHA256
 LABEL org.opencontainers.image.source="https://github.com/SSHdotCodes/qwen-3.8-flash-next-pro6000" \
-      local.flash-next.release="0.5.20-pro6000-20260919-hotmap" \
+      local.flash-next.release="0.5.20-pro6000-20260924-qwenfast" \
       local.flash-next.manifest-sha256="${RUNTIME_MANIFEST_SHA256}"

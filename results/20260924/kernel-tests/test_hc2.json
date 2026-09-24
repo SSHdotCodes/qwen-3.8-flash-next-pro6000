@@ -1,0 +1,86 @@
+[
+ {
+  "M": 1,
+  "mix_rel_err": 0.0,
+  "mix_bf16_agree": 1.0,
+  "combine_bf16_agree": 1.0,
+  "deterministic": true,
+  "ref_us": 16.5,
+  "mine_us": 9.5,
+  "mine_nopdl_us": 10.0,
+  "bar": [
+   0,
+   0
+  ]
+ },
+ {
+  "M": 2,
+  "mix_rel_err": 0.0,
+  "mix_bf16_agree": 1.0,
+  "combine_bf16_agree": 0.9999,
+  "deterministic": true,
+  "ref_us": 16.6,
+  "mine_us": 10.5,
+  "mine_nopdl_us": 10.9,
+  "bar": [
+   0,
+   0
+  ]
+ },
+ {
+  "M": 3,
+  "mix_rel_err": 0.0,
+  "mix_bf16_agree": 1.0,
+  "combine_bf16_agree": 1.0,
+  "deterministic": true,
+  "ref_us": 16.6,
+  "mine_us": 11.3,
+  "mine_nopdl_us": 11.7,
+  "bar": [
+   0,
+   0
+  ]
+ },
+ {
+  "M": 4,
+  "mix_rel_err": 0.0,
+  "mix_bf16_agree": 1.0,
+  "combine_bf16_agree": 0.9999,
+  "deterministic": true,
+  "ref_us": 16.6,
+  "mine_us": 11.4,
+  "mine_nopdl_us": 11.8,
+  "bar": [
+   0,
+   0
+  ]
+ },
+ {
+  "M": 5,
+  "mix_rel_err": 0.00019155300105921924,
+  "mix_bf16_agree": 0.9967,
+  "combine_bf16_agree": 1.0,
+  "deterministic": true,
+  "ref_us": 16.6,
+  "mine_us": 11.8,
+  "mine_nopdl_us": 12.3,
+  "bar": [
+   0,
+   0
+  ]
+ },
+ {
+  "M": 8,
+  "mix_rel_err": 0.00012177482130937278,
+  "mix_bf16_agree": 0.9942,
+  "combine_bf16_agree": 0.9992,
+  "deterministic": true,
+  "ref_us": 16.7,
+  "mine_us": 12.3,
+  "mine_nopdl_us": 12.7,
+  "bar": [
+   0,
+   0
+  ]
+ }
+]

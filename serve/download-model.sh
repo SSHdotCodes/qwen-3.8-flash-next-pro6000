@@ -2,7 +2,7 @@
 # Download the exact target/native-MTP snapshot, with no GPU allocation.
 set -euo pipefail
 export DOCKER_HOST="${DOCKER_HOST:-unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock}"
-IMAGE="${IMAGE:-local/qwen-flash-next:0.5.20-20260919-hotmap}"
+IMAGE="${IMAGE:-local/qwen-flash-next:0.5.20-20260924-qwenfast}"
 HF_CACHE="${HF_CACHE:-$HOME/models/huggingface}"
 mkdir -p "$HF_CACHE"
 exec docker run --rm --security-opt no-new-privileges:true \

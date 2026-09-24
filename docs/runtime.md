@@ -1,4 +1,4 @@
-# Runtime notes — 2026-09-19
+# Runtime notes — 2026-09-19, decode kernels 2026-09-24
 
 ## Reproducible image
 
@@ -48,6 +48,59 @@ limited to this model's shapes. Its combined performance experiment did not
 justify a deployment change. The launcher retains the original Triton verify
 path and no draft temperature multiplier.
 
+## Decode kernels (2026-09-24)
+
+`serve/qwenfast/` holds CUDA kernels for the decode and verify steps, compiled into the image by
+`serve/Dockerfile` (`torch.utils.cpp_extension`, the image's nvcc 13.0, `-gencode arch=compute_120a,code=sm_120a`).
+`sglang/srt/qwenfast.py` loads `/opt/qwenfast/qwenfast.so` and replaces a handful of SGLang functions. The model
+modules import it. Every replacement is shape-gated and falls back to the stock SGLang path otherwise. Prefill and
+the checkpoint, quantization, KV format, context and sampling settings are unchanged.
+
+A verify step (4 tokens) took 14.3 ms, spread over about 1,400 kernels. It is already about 78% bandwidth-efficient,
+so the kernels mostly remove latency between launches:
+
+- **Small-M BF16 GEMM** (1–8 rows) for the GDN input projection (16,480 × 2,560), the MoE router, the LM head and the
+  draft's hot head.
+- **NVFP4 decode MoE** for 1–8 tokens. Two kernels read each selected expert once for all tokens routed to it. They
+  use the same W4A4 recipe as FlashInfer's CUTLASS path: FP4 activations with the same global and block scales, and
+  BF16 rounding of the first GEMM's output and of SwiGLU. The top-k-ordered reduction is deterministic, and the
+  kernels use programmatic dependent launch.
+- **Hyper-connections.** The per-branch Gemma RMSNorm, the low-rank gated mix and the combine's inject products run in
+  one tensor-core kernel (a grid barrier between the down and up projections), followed by a one-pass combine:
+  97 calls per step, 16.6 → about 11 µs each.
+- **GDN output.** The gated RMSNorm is fused into `out_proj`. The kernel is released when the recurrent-state kernel
+  starts and pulls its weight slice into L2 while the recurrence runs (up to 4 tokens).
+- **Verify sampling.** Top-k candidates per row, then one kernel applies temperature, top-k (ties kept), top-p
+  (FlashInfer's pivot rule), renormalization and the chain rejection sampling of SGLang's Triton kernel over the
+  sparse set. It falls back to the dense path unless every request has 1 ≤ top_k ≤ 56. With identical random coins it
+  gave identical accept counts, accepted tokens and final tokens to the dense path in 12,000 of 12,000 randomized
+  cases (random temperatures, top-k 1–56, top-p on and off, tied logits).
+- **Also:** a multi-block softmax for the few 248K-wide rows (the dense fallback and the draft proposal), and the QSA
+  graph row metadata launched as one block over the page table (13–18 → 3–5 µs).
+
+Switches, read by the server process (pass them with `-e` in `serve/run-server.sh`): `QWENFAST=0` disables every
+replacement of an SGLang function. The draft head's small-row GEMM (`hot_head`, called from the MTP model file) stays
+on; it computes draft proposals only, and the target still verifies every token. `QWENFAST_MOE=0`, `QWENFAST_HC=0`, `QWENFAST_GDN=0`, `QWENFAST_SAMPLE=0` and `QWENFAST_QSAMETA=0` disable
+one each. The server log lists the active replacements at startup.
+
+Measured and not used: a fused router GEMM plus top-k ahead of the shared expert (the MoE block is bandwidth-bound:
+72.9 → 73–74 µs), small-M kernels for QKV, `index_qk` and the shared expert (they starve the concurrent GEMM on the
+other stream), CUTLASS and Marlin MoE backends (unsupported for NVFP4, or out of memory), and truncated draft
+proposals (lower acceptance).
+
+Kernel tests (GPU, inside the image; the MoE, router and GDN tests read one layer of the pinned checkpoint from the
+HF cache mount, or from `QWEN_SNAPSHOT`):
+
+```bash
+export DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
+docker run --rm --gpus all --network none -v "$HOME/models/huggingface:/root/.cache/huggingface:ro" \
+  --entrypoint python3 local/qwen-flash-next:0.5.20-20260924-qwenfast /opt/qwenfast/src/test_moe.py
+```
+
+`test_sample.py` (sampler equivalence), `test_hc2.py`, `test_router.py` and `test_gdnout.py` run the same way. Each
+writes its measurements to `/tmp` (`QWENFAST_TEST_OUT`). The published results are in
+[results/20260924/kernel-tests](../results/20260924/kernel-tests).
+
 ## Token-map provenance
 
 The original 65,536-ID map was downloaded from:
@@ -84,7 +137,7 @@ stop inference and run on an available GPU:
 export DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
 docker run --rm --gpus all --network none \
   -v "$PWD/bench/test_qsa_ring.py:/test_qsa_ring.py:ro" \
-  local/qwen-flash-next:0.5.20-20260919-hotmap python3 /test_qsa_ring.py
+  local/qwen-flash-next:0.5.20-20260924-qwenfast python3 /test_qsa_ring.py
 ```
 
 The ring test verifies buffer indexing, not full-model bitwise equivalence.

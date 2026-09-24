@@ -1,0 +1,155 @@
+{
+ "bench": {
+  "baseline": {
+   "per_profile_mean_tok_s": {
+    "code": 170.3,
+    "agent": 172.8,
+    "prose": 158.6,
+    "chinese": 160.3
+   },
+   "overall_tok_s": 165.5,
+   "runs": 12,
+   "collapses": 0,
+   "accept_len": 2.345,
+   "steps_per_s": 69.9,
+   "log_lines": 1064
+  },
+  "v8": {
+   "per_profile_mean_tok_s": {
+    "code": 199.7,
+    "agent": 196.9,
+    "prose": 181.1,
+    "chinese": 179.3
+   },
+   "overall_tok_s": 189.2,
+   "runs": 12,
+   "collapses": 0,
+   "accept_len": 2.339,
+   "steps_per_s": 80.0,
+   "log_lines": 1066
+  },
+  "v9": {
+   "per_profile_mean_tok_s": {
+    "code": 198.9,
+    "agent": 190.3,
+    "prose": 180.9,
+    "chinese": 179.0
+   },
+   "overall_tok_s": 187.3,
+   "runs": 12,
+   "collapses": 0,
+   "accept_len": 2.341,
+   "steps_per_s": 79.4,
+   "log_lines": 1045,
+   "note": "accept/steps from the benchmark window only"
+  }
+ },
+ "greedy_collapse_probe": {
+  "tag": "v9",
+  "total": 36,
+  "degenerate": 0,
+  "rate": 0.0,
+  "per_case": {},
+  "median_decode_tok_s": 214.38
+ },
+ "context_retrieval": [
+  {
+   "prompt_tokens": 8336,
+   "semantic_pass": true,
+   "decode_tok_s": 272.9
+  },
+  {
+   "prompt_tokens": 120144,
+   "semantic_pass": true,
+   "decode_tok_s": 247.7
+  },
+  {
+   "prompt_tokens": 240144,
+   "semantic_pass": true,
+   "decode_tok_s": 233.8
+  }
+ ],
+ "two_concurrent_24k": [
+  {
+   "prompt_tokens": 24070,
+   "semantic_pass": true
+  },
+  {
+   "prompt_tokens": 24070,
+   "semantic_pass": true
+  }
+ ],
+ "gsm8k_chat": {
+  "baseline": {
+   "nothink": {
+    "score": 0.9665,
+    "latency_s": 592.4,
+    "output_tok_s": 335.6
+   },
+   "think": {
+    "score": 0.99,
+    "latency_s": 313.0,
+    "output_tok_s": 334.2
+   }
+  },
+  "v9": {
+   "nothink": {
+    "score": 0.9688,
+    "latency_s": 584.2,
+    "output_tok_s": 349.4
+   },
+   "think": {
+    "score": 0.99,
+    "latency_s": 300.3,
+    "output_tok_s": 354.2
+   }
+  },
+  "protocol": "sglang.test.run_eval gsm8k chat API, 4 threads; nothink = all 1319 greedy 2048 max; think = 200, T1 top-p .95 top-k 20, xhigh"
+ },
+ "long_context_decode": {
+  "baselc": [
+   {
+    "prompt_tokens": 24069,
+    "decode_tok_s": 165.8,
+    "completion_tokens": 2048
+   },
+   {
+    "prompt_tokens": 24069,
+    "decode_tok_s": 165.8,
+    "completion_tokens": 2048
+   },
+   {
+    "prompt_tokens": 96069,
+    "decode_tok_s": 166.1,
+    "completion_tokens": 2048
+   },
+   {
+    "prompt_tokens": 96069,
+    "decode_tok_s": 168.3,
+    "completion_tokens": 2048
+   }
+  ],
+  "v9lc": [
+   {
+    "prompt_tokens": 24069,
+    "decode_tok_s": 189.6,
+    "completion_tokens": 2048
+   },
+   {
+    "prompt_tokens": 24069,
+    "decode_tok_s": 195.9,
+    "completion_tokens": 2048
+   },
+   {
+    "prompt_tokens": 96069,
+    "decode_tok_s": 184.4,
+    "completion_tokens": 2048
+   },
+   {
+    "prompt_tokens": 96069,
+    "decode_tok_s": 189.9,
+    "completion_tokens": 2048
+   }
+  ]
+ }
+}

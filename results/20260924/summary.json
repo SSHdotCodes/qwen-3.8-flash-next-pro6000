@@ -1,0 +1,80 @@
+{
+ "old-20260919": {
+  "runs": 12,
+  "per_profile_tok_s": {
+   "code": [
+    165.8,
+    165.3,
+    173.1
+   ],
+   "agent": [
+    166.2,
+    162.0,
+    164.2
+   ],
+   "prose": [
+    152.4,
+    157.0,
+    151.8
+   ],
+   "chinese": [
+    154.5,
+    163.2,
+    150.0
+   ]
+  },
+  "per_profile_mean_tok_s": {
+   "code": 168.1,
+   "agent": 164.1,
+   "prose": 153.8,
+   "chinese": 155.9
+  },
+  "overall_mean_tok_s": 160.5,
+  "log_lines": 1044,
+  "accept_len": 2.338,
+  "steps_per_s": 68.1
+ },
+ "new-20260924": {
+  "runs": 12,
+  "per_profile_tok_s": {
+   "code": [
+    188.2,
+    189.8,
+    192.1
+   ],
+   "agent": [
+    193.2,
+    194.7,
+    190.1
+   ],
+   "prose": [
+    172.1,
+    177.7,
+    190.0
+   ],
+   "chinese": [
+    182.7,
+    178.0,
+    177.6
+   ]
+  },
+  "per_profile_mean_tok_s": {
+   "code": 190.0,
+   "agent": 192.7,
+   "prose": 179.9,
+   "chinese": 179.4
+  },
+  "overall_mean_tok_s": 185.5,
+  "log_lines": 1049,
+  "accept_len": 2.327,
+  "steps_per_s": 79.1
+ },
+ "change_percent": {
+  "code": 13.0,
+  "agent": 17.4,
+  "prose": 17.0,
+  "chinese": 15.1,
+  "overall": 15.6,
+  "steps_per_s": 16.2
+ }
+}
