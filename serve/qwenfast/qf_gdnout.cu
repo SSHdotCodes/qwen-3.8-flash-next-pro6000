@@ -27,23 +27,70 @@ __device__ __forceinline__ void mma16816(float (&d)[4], uint32_t a0, uint32_t a1
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
 
-template <int T>
+// pk12 (exact 12-bit packed bf16, see qf_pk.cu): 8 weights from 8 m8 bytes + 8 nibbles -> 4 bf16x2 words
+__device__ __forceinline__ uint4 pk_decode8_bf16(uint2 m, uint32_t q, uint32_t base2) {
+    const uint32_t qe = q & 0x0F0F0F0Fu, qo = (q >> 4) & 0x0F0F0F0Fu;
+    uint32_t o[4];
+#pragma unroll
+    for (int p = 0; p < 4; ++p) {
+        const uint32_t mw = p < 2 ? m.x : m.y;
+        const uint32_t u = __byte_perm(mw, 0, (p & 1) == 0 ? 0x4140 : 0x4342);
+        const uint32_t e = __byte_perm(qe, qo, 0x4040 | p | ((4 + p) << 8)) & 0x000F000Fu;
+        o[p] = ((u & 0x00800080u) << 8) | (u & 0x007F007Fu) | ((e + base2) << 7);
+    }
+    return make_uint4(o[0], o[1], o[2], o[3]);
+}
+
+struct PkW {   // packed out_proj weight; m8 == nullptr selects the plain bf16 path
+    const uint8_t * m8; const uint8_t * e4; const uint8_t * base; const int * ex_ptr; const int * ex_k; const float * ex_v;
+    const int8_t * q8; const uint16_t * s8;   // w8g: int8 [2560, 6144] + bf16 group scales [2560, 48] (W8 path)
+};
+
+// 8 int8 (two words) * scale -> 8 bf16 (bf16(q * s), round to nearest even): the exact w8g dequantized weights
+__device__ __forceinline__ uint4 i8x8_to_bf16(uint32_t lo, uint32_t hi, float sc) {
+    float f[8];
+    lo ^= 0x80808080u; hi ^= 0x80808080u;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        f[i] = __int_as_float(__byte_perm(lo, 0x4B000000u, 0x7440 + i)) - 8388736.f;
+        f[4 + i] = __int_as_float(__byte_perm(hi, 0x4B000000u, 0x7440 + i)) - 8388736.f;
+    }
+    uint4 o;
+    __nv_bfloat162 * op = reinterpret_cast<__nv_bfloat162 *>(&o);
+#pragma unroll
+    for (int i = 0; i < 4; ++i) op[i] = __floats2bfloat162_rn(f[2 * i] * sc, f[2 * i + 1] * sc);
+    return o;
+}
+
+template <int T, bool PK, bool W8>
 __global__ void __launch_bounds__(THREADS, 1) gdn_norm_oproj_kernel(
         const __nv_bfloat16 * __restrict__ core, const __nv_bfloat16 * __restrict__ z,
-        const __nv_bfloat16 * __restrict__ w_norm, const __nv_bfloat16 * __restrict__ w,
+        const __nv_bfloat16 * __restrict__ w_norm, const __nv_bfloat16 * __restrict__ w, PkW pk,
         __nv_bfloat16 * __restrict__ y, float eps, int swish, int prefetch) {
     extern __shared__ __align__(16) uint4 smem[];
     __nv_bfloat16 * xs = reinterpret_cast<__nv_bfloat16 *>(smem);              // [T][STRIDE]
     float (*red)[16][8] = reinterpret_cast<float (*)[16][8]>(smem);           // reuses xs after the multiply
+    float (*corr)[8] = reinterpret_cast<float (*)[8]>(reinterpret_cast<char *>(smem) + T * STRIDE * 2);  // pk exceptions
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, grp = lane >> 2, tq = lane & 3;
     const int G = gridDim.x, n0 = (int) ((long) blockIdx.x * N / G), n1 = (int) ((long) (blockIdx.x + 1) * N / G);
     const int nr = n1 - n0;
 
     // ---- weights first: this CTA's rows are one contiguous range; pull it into L2 ----
     if (prefetch && tid == 0) {
-        const __nv_bfloat16 * src = w + (size_t) n0 * K;
-        const unsigned bytes = (unsigned) nr * K * 2;
-        asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(src), "r"(bytes) : "memory");
+        if constexpr (W8) {
+            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(pk.q8 + (size_t) n0 * K), "r"((unsigned) (nr * K)) : "memory");
+            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(pk.s8 + (size_t) n0 * (K / 128)), "r"((unsigned) (nr * K / 64)) : "memory");
+        } else if constexpr (PK) {
+            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(pk.m8 + (size_t) n0 * K), "r"((unsigned) (nr * K)) : "memory");
+            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(pk.e4 + (size_t) n0 * (K / 2)), "r"((unsigned) (nr * K / 2)) : "memory");
+        } else {
+            const __nv_bfloat16 * src = w + (size_t) n0 * K;
+            const unsigned bytes = (unsigned) nr * K * 2;
+            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(src), "r"(bytes) : "memory");
+        }
+    }
+    if constexpr (PK) {
+        if (tid < 16 * 8) corr[tid >> 3][tid & 7] = 0.f;
     }
     // lanes work in groups of 8 on one (token, head) row: 16 elements per lane
     const int sub = lane >> 3, sl = lane & 7;
@@ -131,22 +178,76 @@ __global__ void __launch_bounds__(THREADS, 1) gdn_norm_oproj_kernel(
     const bool v0 = r0 < nr, v1 = r1 < nr;
     const int kb = warp * KW + tq * 8;
     const uint4 zero = make_uint4(0, 0, 0, 0);
-    const uint4 * a0p = reinterpret_cast<const uint4 *>(w + (size_t) (n0 + (v0 ? r0 : 0)) * K + kb);
-    const uint4 * a1p = reinterpret_cast<const uint4 *>(w + (size_t) (n0 + (v1 ? r1 : 0)) * K + kb);
+    const int ra = n0 + (v0 ? r0 : 0), rb = n0 + (v1 ? r1 : 0);
+    const uint4 * a0p = reinterpret_cast<const uint4 *>(w + (size_t) ra * K + kb);
+    const uint4 * a1p = reinterpret_cast<const uint4 *>(w + (size_t) rb * K + kb);
+    uint32_t ba = 0, bb = 0;
+    if constexpr (PK) {
+        ba = pk.base[ra]; ba |= ba << 16;
+        bb = pk.base[rb]; bb |= bb << 16;
+    }
     constexpr int KC = KW / 32, BATCH = 12;
 #pragma unroll
     for (int kc0 = 0; kc0 < KC; kc0 += BATCH) {
         uint4 a0[BATCH], a1[BATCH];
+        if constexpr (W8) {
+            uint2 w0[BATCH], w1[BATCH];
+            uint32_t s0[BATCH], s1[BATCH];
 #pragma unroll
-        for (int i = 0; i < BATCH; ++i) {
-            a0[i] = v0 ? __ldcs(a0p + (kc0 + i) * 4) : zero;
-            a1[i] = v1 ? __ldcs(a1p + (kc0 + i) * 4) : zero;
+            for (int i = 0; i < BATCH; ++i) {
+                const int k = kb + (kc0 + i) * 32;
+                const int gk = (warp * KW + (kc0 + i) * 32) / 128;
+                w0[i] = v0 ? __ldcs(reinterpret_cast<const uint2 *>(pk.q8 + (size_t) ra * K + k)) : make_uint2(0, 0);
+                w1[i] = v1 ? __ldcs(reinterpret_cast<const uint2 *>(pk.q8 + (size_t) rb * K + k)) : make_uint2(0, 0);
+                s0[i] = v0 ? __ldg(pk.s8 + (size_t) ra * (K / 128) + gk) : 0u;
+                s1[i] = v1 ? __ldg(pk.s8 + (size_t) rb * (K / 128) + gk) : 0u;
+            }
+#pragma unroll
+            for (int i = 0; i < BATCH; ++i) {
+                a0[i] = v0 ? i8x8_to_bf16(w0[i].x, w0[i].y, __uint_as_float(s0[i] << 16)) : zero;
+                a1[i] = v1 ? i8x8_to_bf16(w1[i].x, w1[i].y, __uint_as_float(s1[i] << 16)) : zero;
+            }
+        } else if constexpr (PK) {
+            uint2 m0[BATCH], m1[BATCH];
+            uint32_t q0[BATCH], q1[BATCH];
+#pragma unroll
+            for (int i = 0; i < BATCH; ++i) {
+                const int k = kb + (kc0 + i) * 32;
+                m0[i] = v0 ? __ldcs(reinterpret_cast<const uint2 *>(pk.m8 + (size_t) ra * K + k)) : make_uint2(0, 0);
+                m1[i] = v1 ? __ldcs(reinterpret_cast<const uint2 *>(pk.m8 + (size_t) rb * K + k)) : make_uint2(0, 0);
+                q0[i] = v0 ? __ldcs(reinterpret_cast<const uint32_t *>(pk.e4 + (size_t) ra * (K / 2) + k / 2)) : 0u;
+                q1[i] = v1 ? __ldcs(reinterpret_cast<const uint32_t *>(pk.e4 + (size_t) rb * (K / 2) + k / 2)) : 0u;
+            }
+#pragma unroll
+            for (int i = 0; i < BATCH; ++i) {
+                a0[i] = v0 ? pk_decode8_bf16(m0[i], q0[i], ba) : zero;
+                a1[i] = v1 ? pk_decode8_bf16(m1[i], q1[i], bb) : zero;
+            }
+        } else {
+#pragma unroll
+            for (int i = 0; i < BATCH; ++i) {
+                a0[i] = v0 ? __ldcs(a0p + (kc0 + i) * 4) : zero;
+                a1[i] = v1 ? __ldcs(a1p + (kc0 + i) * 4) : zero;
+            }
         }
 #pragma unroll
         for (int i = 0; i < BATCH; ++i) {
             const uint4 b = grp < T ? *reinterpret_cast<const uint4 *>(xs + (size_t) grp * STRIDE + kb + (kc0 + i) * 32) : zero;
             mma16816(d, a0[i].x, a1[i].x, a0[i].y, a1[i].y, b.x, b.y);
             mma16816(d, a0[i].z, a1[i].z, a0[i].w, a1[i].w, b.z, b.w);
+        }
+    }
+    if constexpr (PK) {
+        // exact exceptions (|w| < 2^-14 of the row max, decoded as d = 2^(base-127)): add (w - d) * xn
+        for (int rr = warp; rr < nr; rr += WARPS) {
+            const int n = n0 + rr;
+            const float dd = __uint_as_float(((uint32_t) pk.base[n]) << 23);
+            for (int i = pk.ex_ptr[n] + lane; i < pk.ex_ptr[n + 1]; i += 32) {
+                const int k = pk.ex_k[i];
+                const float v = pk.ex_v[i] - dd;
+#pragma unroll
+                for (int t = 0; t < T; ++t) atomicAdd(&corr[rr][t], v * __bfloat162float(xs[(size_t) t * STRIDE + k]));
+            }
         }
     }
     __syncthreads();                                                          // xs is dead from here on
@@ -161,18 +262,19 @@ __global__ void __launch_bounds__(THREADS, 1) gdn_norm_oproj_kernel(
             float s = 0.f;
 #pragma unroll
             for (int ww = 0; ww < WARPS; ++ww) s += red[ww][r][t];
+            if constexpr (PK) s += corr[r][t];
             y[(size_t) t * N + n0 + r] = __float2bfloat16(s);
         }
     }
 }
 
-template <int T>
-void launch(const at::Tensor & core, const at::Tensor & z, const at::Tensor & w_norm, const at::Tensor & w,
+template <int T, bool PK, bool W8>
+void launch(const at::Tensor & core, const at::Tensor & z, const at::Tensor & w_norm, const __nv_bfloat16 * w, PkW pk,
             at::Tensor & y, float eps, bool swish, int grid, cudaStream_t s, bool pdl, bool prefetch) {
-    const int smem = std::max(T * STRIDE * 2, WARPS * 16 * 8 * 4);
+    const int smem = std::max(T * STRIDE * 2 + (PK ? 16 * 8 * 4 : 0), WARPS * 16 * 8 * 4);
     static bool attr = false;
     if (!attr) {
-        C10_CUDA_CHECK(cudaFuncSetAttribute(gdn_norm_oproj_kernel<T>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+        C10_CUDA_CHECK(cudaFuncSetAttribute(gdn_norm_oproj_kernel<T, PK, W8>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
         attr = true;
     }
     cudaLaunchConfig_t cfg = {};
@@ -185,21 +287,20 @@ void launch(const at::Tensor & core, const at::Tensor & z, const at::Tensor & w_
     lattr[0].val.programmaticStreamSerializationAllowed = pdl ? 1 : 0;
     cfg.attrs = lattr;
     cfg.numAttrs = 1;
-    C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, gdn_norm_oproj_kernel<T>, (const __nv_bfloat16 *) core.data_ptr(),
+    C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, gdn_norm_oproj_kernel<T, PK, W8>, (const __nv_bfloat16 *) core.data_ptr(),
                                       (const __nv_bfloat16 *) z.data_ptr(), (const __nv_bfloat16 *) w_norm.data_ptr(),
-                                      (const __nv_bfloat16 *) w.data_ptr(), (__nv_bfloat16 *) y.data_ptr(), eps,
-                                      swish ? 1 : 0, prefetch ? 1 : 0));
+                                      w, pk, (__nv_bfloat16 *) y.data_ptr(), eps, swish ? 1 : 0, prefetch ? 1 : 0));
 }
 
 }  // namespace
 
-// core, z: [T*48, 128] bf16 contiguous (T 1..8); w_norm [128] bf16; w [2560, 6144] bf16. Returns y [T, 2560] bf16.
-at::Tensor gdn_norm_oproj(const at::Tensor & core, const at::Tensor & z, const at::Tensor & w_norm, double eps,
-                          bool swish, const at::Tensor & w, bool pdl, bool prefetch) {
+namespace {
+template <bool PK, bool W8 = false>
+at::Tensor run(const at::Tensor & core, const at::Tensor & z, const at::Tensor & w_norm, double eps, bool swish,
+               const __nv_bfloat16 * w, PkW pk, bool pdl, bool prefetch) {
     TORCH_CHECK(core.is_cuda() && core.scalar_type() == at::kBFloat16 && core.dim() == 2 && core.size(1) == HD && core.is_contiguous());
     TORCH_CHECK(z.scalar_type() == at::kBFloat16 && z.sizes() == core.sizes() && z.is_contiguous());
     TORCH_CHECK(w_norm.scalar_type() == at::kBFloat16 && w_norm.numel() == HD && w_norm.is_contiguous());
-    TORCH_CHECK(w.scalar_type() == at::kBFloat16 && w.dim() == 2 && w.size(0) == N && w.size(1) == K && w.is_contiguous());
     TORCH_CHECK(core.size(0) % HEADS == 0);
     const int T = core.size(0) / HEADS;
     TORCH_CHECK(T >= 1 && T <= MAXT);
@@ -208,18 +309,50 @@ at::Tensor gdn_norm_oproj(const at::Tensor & core, const at::Tensor & z, const a
     const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
     const int grid = std::min(sms, N / 8);
     TORCH_CHECK((N + grid - 1) / grid <= 16, "too few SMs for gdn_norm_oproj");
-    TORCH_CHECK(w.data_ptr() != nullptr && reinterpret_cast<uintptr_t>(w.data_ptr()) % 16 == 0);
     cudaStream_t s = at::cuda::getCurrentCUDAStream();
     const float e = (float) eps;
     switch (T) {
-        case 1: launch<1>(core, z, w_norm, w, y, e, swish, grid, s, pdl, prefetch); break;
-        case 2: launch<2>(core, z, w_norm, w, y, e, swish, grid, s, pdl, prefetch); break;
-        case 3: launch<3>(core, z, w_norm, w, y, e, swish, grid, s, pdl, prefetch); break;
-        case 4: launch<4>(core, z, w_norm, w, y, e, swish, grid, s, pdl, prefetch); break;
-        case 5: launch<5>(core, z, w_norm, w, y, e, swish, grid, s, pdl, prefetch); break;
-        case 6: launch<6>(core, z, w_norm, w, y, e, swish, grid, s, pdl, prefetch); break;
-        case 7: launch<7>(core, z, w_norm, w, y, e, swish, grid, s, pdl, prefetch); break;
-        default: launch<8>(core, z, w_norm, w, y, e, swish, grid, s, pdl, prefetch); break;
+        case 1: launch<1, PK, W8>(core, z, w_norm, w, pk, y, e, swish, grid, s, pdl, prefetch); break;
+        case 2: launch<2, PK, W8>(core, z, w_norm, w, pk, y, e, swish, grid, s, pdl, prefetch); break;
+        case 3: launch<3, PK, W8>(core, z, w_norm, w, pk, y, e, swish, grid, s, pdl, prefetch); break;
+        case 4: launch<4, PK, W8>(core, z, w_norm, w, pk, y, e, swish, grid, s, pdl, prefetch); break;
+        case 5: launch<5, PK, W8>(core, z, w_norm, w, pk, y, e, swish, grid, s, pdl, prefetch); break;
+        case 6: launch<6, PK, W8>(core, z, w_norm, w, pk, y, e, swish, grid, s, pdl, prefetch); break;
+        case 7: launch<7, PK, W8>(core, z, w_norm, w, pk, y, e, swish, grid, s, pdl, prefetch); break;
+        default: launch<8, PK, W8>(core, z, w_norm, w, pk, y, e, swish, grid, s, pdl, prefetch); break;
     }
     return y;
+}
+}  // namespace
+
+// core, z: [T*48, 128] bf16 contiguous (T 1..8); w_norm [128] bf16; w [2560, 6144] bf16. Returns y [T, 2560] bf16.
+at::Tensor gdn_norm_oproj(const at::Tensor & core, const at::Tensor & z, const at::Tensor & w_norm, double eps,
+                          bool swish, const at::Tensor & w, bool pdl, bool prefetch) {
+    TORCH_CHECK(w.scalar_type() == at::kBFloat16 && w.dim() == 2 && w.size(0) == N && w.size(1) == K && w.is_contiguous());
+    TORCH_CHECK(w.data_ptr() != nullptr && reinterpret_cast<uintptr_t>(w.data_ptr()) % 16 == 0);
+    PkW pk{};
+    return run<false>(core, z, w_norm, eps, swish, (const __nv_bfloat16 *) w.data_ptr(), pk, pdl, prefetch);
+}
+
+// same with the out_proj weight stored pk12 (m8 [2560, 6144], e4 [2560, 3072], base [2560], CSR exceptions)
+at::Tensor gdn_norm_oproj_pk(const at::Tensor & core, const at::Tensor & z, const at::Tensor & w_norm, double eps,
+                             bool swish, const at::Tensor & m8, const at::Tensor & e4, const at::Tensor & base,
+                             const at::Tensor & ex_ptr, const at::Tensor & ex_k, const at::Tensor & ex_v, bool pdl, bool prefetch) {
+    TORCH_CHECK(m8.scalar_type() == at::kByte && m8.size(0) == N && m8.size(1) == K && m8.is_contiguous());
+    TORCH_CHECK(e4.scalar_type() == at::kByte && e4.size(0) == N && e4.size(1) == K / 2 && e4.is_contiguous());
+    TORCH_CHECK(base.numel() == N && ex_ptr.numel() == N + 1 && ex_k.scalar_type() == at::kInt && ex_v.scalar_type() == at::kFloat);
+    PkW pk{m8.data_ptr<uint8_t>(), e4.data_ptr<uint8_t>(), base.data_ptr<uint8_t>(), ex_ptr.data_ptr<int>(),
+           ex_k.data_ptr<int>(), ex_v.data_ptr<float>()};
+    return run<true>(core, z, w_norm, eps, swish, nullptr, pk, pdl, prefetch);
+}
+
+// same with the out_proj weight stored w8g (int8 q [2560, 6144], bf16 group scales s [2560, 48])
+at::Tensor gdn_norm_oproj_w8(const at::Tensor & core, const at::Tensor & z, const at::Tensor & w_norm, double eps,
+                             bool swish, const at::Tensor & q, const at::Tensor & sc, bool pdl, bool prefetch) {
+    TORCH_CHECK(q.scalar_type() == at::kChar && q.size(0) == N && q.size(1) == K && q.is_contiguous());
+    TORCH_CHECK(sc.scalar_type() == at::kBFloat16 && sc.size(0) == N && sc.size(1) == K / 128 && sc.is_contiguous());
+    PkW pk{};
+    pk.q8 = reinterpret_cast<const int8_t *>(q.data_ptr());
+    pk.s8 = reinterpret_cast<const uint16_t *>(sc.data_ptr());
+    return run<false, true>(core, z, w_norm, eps, swish, nullptr, pk, pdl, prefetch);
 }

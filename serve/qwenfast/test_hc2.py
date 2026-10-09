@@ -1,6 +1,5 @@
 import json, os, sys, torch
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+sys.path.insert(0, '/w/ext')
 from build_qf import build
 qf = build()
 from sglang.srt.layers.hc_mix_triton import fused_hc_mix
@@ -63,4 +62,4 @@ for M in (1, 2, 3, 4, 5, 8):
                deterministic=det, ref_us=round(t_ref, 1), mine_us=round(t_mine, 1), mine_nopdl_us=round(t_nopdl, 1), bar=bar.tolist())
     rows.append(row)
     print(json.dumps(row), flush=True)
-json.dump(rows, open(os.environ.get('QWENFAST_TEST_OUT', '/tmp') + '/test_hc2.json', 'w'), indent=1)
+json.dump(rows, open('/w/ext/test_hc2.json', 'w'), indent=1)

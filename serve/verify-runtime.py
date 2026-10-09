@@ -39,7 +39,7 @@ def verify(installed=False):
     )
     tokens = json.loads(token_path.read_text())
     if (
-        len(tokens) != 65800
+        len(tokens) != manifest["draft_hot_ids"]
         or any(type(i) is not int or not 0 <= i < 248320 for i in tokens)
         or tokens != sorted(set(tokens))
         or not set(range(248044, 248320)).issubset(tokens)
@@ -52,7 +52,7 @@ def verify(installed=False):
                 raise ValueError(f"{name}: expected {expected}, found {actual}")
     print(
         f"Verified {len(manifest['files'])} runtime files, {len(kernels['sources'])} kernel sources"
-        " and 65,800 draft IDs"
+        f" and {manifest['draft_hot_ids']:,} draft IDs"
         + ("; installed package versions match" if installed else "")
     )
 

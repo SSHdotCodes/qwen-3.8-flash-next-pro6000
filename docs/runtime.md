@@ -1,19 +1,21 @@
-# Runtime notes — 2026-09-19, decode kernels 2026-09-24
+# Runtime notes — 2026-09-19, decode kernels 2026-09-24, RedHatAI and decode work 2026-10-05, W4A16 2026-10-09
 
 ## Reproducible image
 
-`serve/Dockerfile` starts from official SGLang 0.5.20 digest
-`06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f`.
-The dependency repairs match the tested workstation image: remove unused
-`nixl` (generic CUDA 12 shim) and optional `cosmos-guardrail`, retain the CUDA 13
-NIXL distribution, and pin NCCL, protobuf, grpcio-tools, typeguard, Pillow and
-OpenCV. `pip check` must pass. The runtime verifier checks SGLang 0.5.20,
-PyTorch 2.13.0+cu130, SGLang kernel 0.4.7 and FlashInfer 0.6.18 too.
+`serve/Dockerfile` starts from the official SGLang v0.5.21 image, digest
+`b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469`.
+The dependency repairs match the tested workstation image:
+- remove the unused `nixl` (generic CUDA 12 shim) and the optional `cosmos-guardrail`;
+- keep the CUDA 13 NIXL distribution;
+- pin NCCL, protobuf, grpcio-tools, typeguard, Pillow and OpenCV.
 
-The measured local image digest begins `a2198845`; it is **not a pullable public
+`pip check` must pass. The runtime verifier also checks SGLang 0.5.21, PyTorch 2.13.0+cu130, SGLang
+kernel 0.4.7 and FlashInfer 0.6.18.
+
+The measured local image digest begins `ed0946e2`; it is **not a pullable public
 registry digest**. This repository rebuilds from its public base and puts the
-validated overlays into the image instead of workstation-specific bind mounts.
-Build timestamps/attestations can change the resulting image digest. Package
+overlays into the image instead of workstation-specific bind mounts.
+Build timestamps and attestations can change the resulting image digest. Package
 versions and all installed overlay hashes are checked against `serve/runtime.json`.
 
 ## What the overlays do
@@ -101,6 +103,55 @@ docker run --rm --gpus all --network none -v "$HOME/models/huggingface:/root/.ca
 writes its measurements to `/tmp` (`QWENFAST_TEST_OUT`). The published results are in
 [results/20260924/kernel-tests](../results/20260924/kernel-tests).
 
+## RedHatAI checkpoint (2026-10-05)
+
+`serve/prepare-model.py` builds `target/` and `draft/` views of the pinned snapshot from symlinks plus their own
+`config.json` and index. The raw checkpoint is not modified.
+- **Layer labels:** SGLang 0.5.21 calls the QSA blocks `full_attention`.
+- **Target scope:** the target view keeps the BF16 PLE table (`ple_embedding_dtype`). It adds an ignore rule
+  limiting quantization to `mlp.experts`, because Qwen4's runtime flattens module prefixes that the checkpoint's
+  own ignore list names. It also sets `redhat_streamed_load`, which `model_loader/loader.py` reads to stage the
+  checkpoint in bounded memory.
+- **Draft view:** keeps only the `mtp.*` tensors and drops the quantization config. FP8 is applied online.
+- **Per-expert activation scales:** RedHatAI stores one GEMM2 activation scale per expert, and the W4A4 MoE decode
+  kernel accepts scalar and per-expert scales.
+- **Pinned host memory:** `pinned_max_round_threshold_mb:128` in `PYTORCH_CUDA_ALLOC_CONF` stops the 102.4 GB
+  pinned PLE allocation from being rounded up to 137.4 GB.
+
+## Decode work (2026-10-05)
+
+Environment switches:
+- `QWENFAST_PK=1`: exact 12-bit storage of the BF16 GDN in_proj, attention qkv/o_proj and lm_head (`qf_pk.cu`).
+  Each weight is one byte plus a 4-bit exponent offset from a per-row base, with a per-row exception list holding
+  the rare outliers exactly. Every matrix is unpacked and compared bit for bit at load; any mismatch stops startup.
+- `QWENFAST_ROUTER=1`: fused router GEMM and softmax top-10.
+- `QWEN_MTP_HOT_INT8=1`, `QWEN_MTP_FC_INT8=1` and `--speculative-draft-model-quantization fp8`: draft-side INT8 / FP8
+  weights. Draft numerics change acceptance only.
+
+The draft hot map grew from 65,800 to 97,800 IDs (CJK coverage; see the token-map section).
+
+## October 9 changes
+
+Target side:
+- `QWENFAST_W8=inproj,qkv,oproj,head,shared,outproj,hc`: group-scaled INT8 dense weights (`qf_w8g.cu`,
+  `qf_hc8.cu`, `qf_gdnout.cu`). There is one BF16 scale per 128 weights, rounded before quantizing so that q * s is
+  the exact dequantized value. Prefill unpacks to BF16 and runs the stock GEMM on the same dequantized weights.
+- `QWEN_NVFP4_MARLIN=1` (compressed-tensors NVFP4 MoE overlay): the routed experts run as W4A16 through SGLang's
+  Marlin NVFP4 MoE kernels. Gate and up are loaded in `[gate; up]` order. Each expert is repacked into its own
+  storage, because the Marlin layout has the same byte count, which avoids a second copy of a layer's experts at
+  load. The checkpoint's per-expert input scales are unused in this mode.
+
+Draft side:
+- `QWEN_DRAFT_TRUNC=1`: proposals are drawn from the draft's own top-k / top-p truncation, built from its top-64
+  logits. Rejection sampling stays exact because the verify step sees the same truncated q. The draft CUDA graph
+  carries `top_ps` in a device buffer (`speculative/eagle_draft_cuda_graph_runner.py`).
+- `QWEN_MTP_HOT_SCREEN=1`: an INT4 copy of the hot head screens 64 candidates per row, and only those get exact
+  INT8 logits (`qf_w4s.cu`).
+- `qf_topk.cu`: a radix-select top-k matching `torch.topk`, and the fused truncated-proposal sampler.
+
+Turn off one feature by removing its variable from `serve/run-server.sh`. `QWENFAST=0` turns off all qwenfast
+replacements.
+
 ## Token-map provenance
 
 The original 65,536-ID map was downloaded from:
@@ -117,8 +168,12 @@ validated as a list/tensor of in-range integer IDs. The shipped JSON is:
 sorted(set(source_ids) | set(range(248044, 248320)))
 ```
 
-It has 65,800 unique IDs and SHA-256
-`8a4f4c7c5905b76861a62befa1e060e16362e1775087fbb78e907fd85c4c9c12`.
+That September map has 65,800 unique IDs and SHA-256
+`8a4f4c7c5905b76861a62befa1e060e16362e1775087fbb78e907fd85c4c9c12`. It missed almost all
+CJK tokens: 8.67% of Chinese output tokens fell outside it. The October 5 map adds the 16,000
+lowest-ID missing CJK tokens and the 16,000 lowest-ID other missing tokens. It has 97,800 unique IDs,
+including all 276 special IDs, and SHA-256
+`2123b2db7f4e1ecd99879db17fcbdd58a887fbb315a45f61c6c83b6ffb04f679`.
 No map download or pickle loading occurs at server startup. Changing this map
 requires new sampling/correctness/performance checks; a smaller proposal space
 can hurt acceptance on languages or tasks poorly represented in it.

@@ -22,6 +22,7 @@ class LauncherTests(unittest.TestCase):
             "NAME": "qwen38-flash-next-sglang",
             "HF_CACHE": "/tmp/model cache",
             "RUNTIME_CACHE": "/tmp/runtime cache",
+            "MODEL_VIEWS": "/tmp/views",
             **overrides,
         }
         return subprocess.run(
@@ -38,9 +39,12 @@ class LauncherTests(unittest.TestCase):
         expected = {
             "-p": "127.0.0.1:30010:30010",
             "--context-length": "262144",
-            "--max-total-tokens": "524288",
+            "--max-total-tokens": "786432",
             "--kv-cache-dtype": "fp8_e4m3",
-            "--quantization": "modelopt_fp4",
+            "--quantization": "compressed-tensors",
+            "--model-path": "/opt/redhat-model/target",
+            "--speculative-draft-model-path": "/opt/redhat-model/draft",
+            "--speculative-draft-model-quantization": "fp8",
             "--max-running-requests": "2",
             "--speculative-num-steps": "3",
             "--speculative-num-draft-tokens": "4",
@@ -52,13 +56,20 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual(args[args.index(flag) + 1], value, flag)
         self.assertIn("--speculative-use-rejection-sampling", args)
         self.assertIn("--enable-response-store", args)
-        self.assertIn("QWEN_MTP_HOTMAP=/opt/qwen-mtp-hotmap.json", args)
+        for env in (
+            "QWEN_MTP_HOTMAP=/opt/qwen-mtp-hotmap.json",
+            "QWEN_NVFP4_MARLIN=1",
+            "QWENFAST_PK=1",
+            "QWENFAST_W8=inproj,qkv,oproj,head,shared,outproj,hc",
+            "QWEN_DRAFT_TRUNC=1",
+        ):
+            self.assertIn(env, args)
         self.assertNotIn("--network", args)
         self.assertNotIn("--disable-flashinfer-autotune", args)
         self.assertIn("/tmp/model cache:/root/.cache/huggingface", args)
-        self.assertEqual(
-            args[args.index("--model-path") + 1],
-            args[args.index("--speculative-draft-model-path") + 1],
+        self.assertIn("/tmp/model cache:/tmp/model cache:ro", args)
+        self.assertIn(
+            "/tmp/views/c8f2fb1b9869f686b214782036123b10ff96d14a:/opt/redhat-model:ro", args
         )
 
     def test_port_override_and_rejection(self):

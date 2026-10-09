@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Download the exact target/native-MTP snapshot, with no GPU allocation.
+# Download the exact RedHatAI NVFP4 snapshot (target + native MTP), with no GPU allocation,
+# then build the target/draft views the server loads.
 set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export DOCKER_HOST="${DOCKER_HOST:-unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock}"
-IMAGE="${IMAGE:-local/qwen-flash-next:0.5.20-20260924-qwenfast}"
+IMAGE="${IMAGE:-local/qwen-flash-next:0.5.21-20261009-a16}"
 HF_CACHE="${HF_CACHE:-$HOME/models/huggingface}"
 mkdir -p "$HF_CACHE"
-exec docker run --rm --security-opt no-new-privileges:true \
+docker run --rm --security-opt no-new-privileges:true \
   -e HF_HOME=/root/.cache/huggingface \
   -v "$HF_CACHE:/root/.cache/huggingface" \
-  --entrypoint hf "$IMAGE" download RadixArk/Qwen3.8-Flash-Next-NVFP4 \
-  --revision 7b719225242aacd3dbd3f9407468c2ee9a9d2594
+  --entrypoint hf "$IMAGE" download RedHatAI/Qwen3.8-Flash-Next-NVFP4 \
+  --revision c8f2fb1b9869f686b214782036123b10ff96d14a
+HF_CACHE="$HF_CACHE" python3 "$HERE/prepare-model.py"

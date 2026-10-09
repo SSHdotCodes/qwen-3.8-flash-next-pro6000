@@ -111,7 +111,7 @@ __device__ __forceinline__ void quant_x_block(const __nv_bfloat16 * __restrict__
 __global__ void __launch_bounds__(G1_THREADS) moe_gemm1_kernel(
         const __nv_bfloat16 * __restrict__ x, int T, const int * __restrict__ ids,
         const uint8_t * __restrict__ w13, const uint8_t * __restrict__ w13_sf, const float * __restrict__ g1_alpha,
-        const float * __restrict__ a1_gs_p, const float * __restrict__ a2_gs_p, int n_experts,
+        const float * __restrict__ a1_gs_p, const float * __restrict__ a2_gs_p, int n_experts, int a1_stride, int a2_stride,
         uint32_t * __restrict__ hq, float * __restrict__ hsf) {
     extern __shared__ int2 s_x[];                // [T_e][H / 8] int8 x2 split, then [T_e][HB] floats
     __shared__ int s_ids[MAXSLOT];
@@ -149,7 +149,7 @@ __global__ void __launch_bounds__(G1_THREADS) moe_gemm1_kernel(
     const unsigned mask = s_mask;
     const int te = __popc(mask);
     float * s_xsf = reinterpret_cast<float *>(s_x + te * (H / 8));
-    const float a1_gs = *a1_gs_p;
+    const float a1_gs = a1_gs_p[e * a1_stride];
     for (int c = tid; c < te * HB; c += G1_THREADS) {
         const int rk = c / HB, b = c % HB;
         unsigned m = mask;
@@ -217,7 +217,7 @@ __global__ void __launch_bounds__(G1_THREADS) moe_gemm1_kernel(
 #pragma unroll
         for (int j = 0; j < 16; ++j) v[j] = s_act[rk][j];
         float sf;
-        const uint2 q = quant16(v, *a2_gs_p, sf);
+        const uint2 q = quant16(v, a2_gs_p[e * a2_stride], sf);
         const size_t pair = (size_t) pos * MAXT + t;
         hq[pair * (I / 8) + 2 * jt] = q.x;
         hq[pair * (I / 8) + 2 * jt + 1] = q.y;
@@ -371,7 +371,7 @@ __global__ void __launch_bounds__(G2_THREADS) moe_gemm2_kernel(
 
 // x [T, 2560] bf16 (T <= 8); topk_ids [T, 10] int32; topk_w [T, 10] fp32;
 // w13 [E, 1280, 1280] uint8 ([up; gate]); w13_sf swizzled e4m3 [E, 1280, 160]; g1_alpha [E];
-// w2 [E, 2560, 320] uint8; w2_sf swizzled e4m3 [E, 2560, 40]; g2_alpha [E]; a1_gs / a2_gs fp32 scalars (device).
+// w2 [E, 2560, 320] uint8; w2_sf swizzled e4m3 [E, 2560, 40]; g2_alpha [E]; a1_gs / a2_gs fp32 scalars or per-expert vectors (device).
 at::Tensor nvfp4_moe_decode(const at::Tensor & x, const at::Tensor & topk_ids, const at::Tensor & topk_w,
                             const at::Tensor & w13, const at::Tensor & w13_sf, const at::Tensor & g1_alpha,
                             const at::Tensor & a1_gs, const at::Tensor & w2, const at::Tensor & w2_sf,
@@ -383,7 +383,7 @@ at::Tensor nvfp4_moe_decode(const at::Tensor & x, const at::Tensor & topk_ids, c
     TORCH_CHECK(w13.size(1) == W13_ROWS && w13.size(2) == H / 2 && w2.size(1) == H && w2.size(2) == I / 2);
     TORCH_CHECK(w13_sf.numel() == w13.size(0) * W13_ROWS * HB && w2_sf.numel() == w2.size(0) * H * IB);
     TORCH_CHECK(w13.size(0) == w2.size(0) && g1_alpha.numel() == w13.size(0) && g2_alpha.numel() == w13.size(0));
-    TORCH_CHECK(a1_gs.scalar_type() == at::kFloat && a2_gs.scalar_type() == at::kFloat && a1_gs.numel() == 1 && a2_gs.numel() == 1);
+    TORCH_CHECK(a1_gs.scalar_type() == at::kFloat && a2_gs.scalar_type() == at::kFloat && (a1_gs.numel() == 1 || a1_gs.numel() == w13.size(0)) && (a2_gs.numel() == 1 || a2_gs.numel() == w13.size(0)));
     const c10::cuda::CUDAGuard guard(x.device());
     cudaStream_t s = at::cuda::getCurrentCUDAStream();
     auto opts = x.options();
@@ -417,7 +417,7 @@ at::Tensor nvfp4_moe_decode(const at::Tensor & x, const at::Tensor & topk_ids, c
                                           (const int *) topk_ids.data_ptr<int>(), (const uint8_t *) w13.data_ptr(),
                                           (const uint8_t *) w13_sf.data_ptr(), (const float *) g1_alpha.data_ptr<float>(),
                                           (const float *) a1_gs.data_ptr<float>(), (const float *) a2_gs.data_ptr<float>(),
-                                          (int) w13.size(0), reinterpret_cast<uint32_t *>(hq.data_ptr<int>()),
+                                          (int) w13.size(0), a1_gs.numel() == 1 ? 0 : 1, a2_gs.numel() == 1 ? 0 : 1, reinterpret_cast<uint32_t *>(hq.data_ptr<int>()),
                                           hsf.data_ptr<float>()));
     }
     cudaLaunchConfig_t cfg = {};

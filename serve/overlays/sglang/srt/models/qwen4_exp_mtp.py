@@ -11,7 +11,6 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from sglang.srt.distributed import get_pp_group
 from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.layers.layernorm import GemmaRMSNorm
@@ -25,6 +24,14 @@ from sglang.srt.runtime_context import get_model, get_parallel, get_spec
 from sglang.srt.utils import add_prefix, is_npu
 
 logger = logging.getLogger(__name__)
+_HOT_INT8 = os.environ.get("QWEN_MTP_HOT_INT8", "0") == "1"
+_FC_INT8 = os.environ.get("QWEN_MTP_FC_INT8", "0") == "1"
+# Draft-only hot-head screening (needs QWEN_MTP_HOT_INT8): an INT4 copy (groups of 64) of the hot head picks 64
+# candidates per row, their exact INT8 logits are recomputed and every other logit stays -inf. With the truncated
+# draft proposal (QWEN_DRAFT_TRUNC, top-k <= 64) q is then built from the same INT8 logits as without screening
+# whenever the INT8 top-k lies inside the candidates.
+_HOT_SCREEN = os.environ.get("QWEN_MTP_HOT_SCREEN", "0") == "1"
+_LIN_INT8 = os.environ.get("QWEN_MTP_LIN_INT8", "0") == "1"
 
 
 class ShortlistDraftLogitsProcessor(LogitsProcessor):
@@ -61,9 +68,10 @@ class ShortlistDraftLogitsProcessor(LogitsProcessor):
         from sglang.srt.layers.logits_processor import should_apply_lm_head_quant_method
         # Unsupported heads keep the original path, including initial model
         # profiling before the unquantized target head is shared with the draft.
+        pk = getattr(lm_head, "_qf_pk", None)
         if (not hasattr(lm_head, "weight")
             or lm_head.weight.dtype not in (torch.bfloat16, torch.float16)
-            or lm_head.weight.shape[0] != 248320
+            or (pk is None and lm_head.weight.shape[0] != 248320)
             or should_apply_lm_head_quant_method(lm_head, getattr(lm_head, "quant_method", None))
             or embedding_bias is not None
             or hasattr(lm_head, "set_lora")
@@ -82,10 +90,51 @@ class ShortlistDraftLogitsProcessor(LogitsProcessor):
                 version = None
             key = (lm_head.weight.data_ptr(), version)
             if key != self.hot_weight_key:
-                self.hot_weight = lm_head.weight.index_select(0, self.hot_ids).contiguous()
+                if pk is not None:   # target head stored 12-bit packed (exact); unpack only the hot rows
+                    from sglang.srt.qwenfast import pk_gather_rows
+                    hot = pk_gather_rows(pk, self.hot_ids)
+                else:
+                    hot = lm_head.weight.index_select(0, self.hot_ids)
+                if _HOT_INT8 and not self.use_fp32_lm_head and hot.dtype == torch.bfloat16:
+                    # Draft-only INT8 copy (symmetric per row): half the bytes per draft step. The target head
+                    # is untouched; exact rejection sampling sees the q actually sampled from.
+                    amax = hot.float().abs().amax(dim=1).clamp_min_(1e-30)
+                    self.hot_scale = (amax / 127.0).contiguous()
+                    self.hot_q = torch.round(hot.float() / self.hot_scale[:, None]).clamp_(-127, 127).to(torch.int8).contiguous()
+                    self.hot_weight = None
+                    self.hot_q4 = self.hot_s4 = None
+                    if _HOT_SCREEN and hot.shape[1] == 2560:
+                        xg = hot.float().view(hot.shape[0], 40, 64)
+                        s4 = (xg.abs().amax(2) / 7.0).clamp_min_(1e-30).to(torch.bfloat16)
+                        q = (xg / s4.float().unsqueeze(-1)).round_().clamp_(-7, 7).add_(8).to(torch.uint8).view(hot.shape[0], 2560)
+                        self.hot_q4 = (q[:, 0::2] | (q[:, 1::2] << 4)).contiguous()
+                        self.hot_s4 = s4.contiguous()
+                        del xg, q, s4
+                        logger.info("Draft hot head screening: INT4 copy %s", tuple(self.hot_q4.shape))
+                    del hot, amax
+                    logger.info("Draft hot head stored as INT8 per-row: %s", tuple(self.hot_q.shape))
+                else:
+                    self.hot_weight = hot.contiguous()
                 self.hot_weight_key = key
             part = None
-            if not self.use_fp32_lm_head:
+            if (self.hot_weight is None and getattr(self, "hot_q4", None) is not None and 1 <= h.shape[0] <= 8
+                    and h.dtype == torch.bfloat16 and logits.dtype == torch.bfloat16):
+                from sglang.srt.qwenfast import ext
+                hc = h.contiguous()
+                _, cidx = ext().topk_rows(ext().w4g_gemm(hc, self.hot_q4, self.hot_s4), 64)
+                exact = ext().rows_dot_i8(hc, self.hot_q, self.hot_scale, cidx)
+                logits.scatter_(1, self.hot_ids[cidx], exact.to(logits.dtype))
+                return logits
+            if self.hot_weight is None:
+                from sglang.srt.qwenfast import ext
+                if 1 <= h.shape[0] <= 8:
+                    part = ext().w8_gemm(h.contiguous(), self.hot_q, self.hot_scale, 0)
+                elif h.shape[0] == 0:
+                    part = h.new_empty((0, self.hot_q.shape[0]))
+                else:
+                    part = torch.cat([ext().w8_gemm(h[i:i + 8].contiguous(), self.hot_q, self.hot_scale, 0)
+                                      for i in range(0, h.shape[0], 8)])
+            elif not self.use_fp32_lm_head:
                 from sglang.srt.qwenfast import hot_head
                 part = hot_head(h, self.hot_weight)
             if part is None:
@@ -127,7 +176,7 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
         self.config = config
         self.tp_size = get_parallel().tp_size
         self.quant_config = quant_config
-        self.pp_group = get_pp_group()
+        self.pp_group = get_parallel().pp_group
         self.hidden_size = config.hidden_size
         self.hc_count = config.hc_count
         self._mtp_input_fusion = self._init_mtp_input_fusion(config)
@@ -182,16 +231,41 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
         self._init_pre_fc_norms(config)
         return self._fuse_residual_linear_shared
 
+    def _fc_int8(self, lin: nn.Linear, x: torch.Tensor) -> torch.Tensor:
+        """Draft-only INT8 (per-row) copy of a 2560x2560 MTP input projection for <= 8-row calls."""
+        if not _FC_INT8 or lin.bias is not None or lin.weight.dtype != torch.bfloat16:
+            return lin(x)
+        cache = getattr(lin, "_qf_i8", None)
+        if cache is None:
+            if torch.cuda.is_current_stream_capturing():
+                return lin(x)
+            w = lin.weight.float()
+            s = (w.abs().amax(dim=1).clamp_min(1e-30) / 127.0).contiguous()
+            q = torch.round(w / s[:, None]).clamp_(-127, 127).to(torch.int8).contiguous()
+            cache = lin._qf_i8 = (q, s)
+        x2 = x.reshape(-1, x.shape[-1])
+        if x2.shape[0] > 16:          # prefill / long extends: BF16 GEMM
+            return lin(x)
+        from sglang.srt.qwenfast import ext, w8_rows_ok
+        outs = []
+        for i in range(0, x2.shape[0], 8):
+            part = x2[i:i + 8]
+            if not w8_rows_ok(part):
+                return lin(x)
+            outs.append(ext().w8_gemm(part, cache[0], cache[1], 0))
+        y = outs[0] if len(outs) == 1 else torch.cat(outs)
+        return y.view(*x.shape[:-1], cache[0].shape[0])
+
     def _fuse_residual_linear_shared(
         self, input_embeds: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
-        input_embeds = self.fc_embedding(self.pre_fc_norm_embedding(input_embeds))
+        input_embeds = self._fc_int8(self.fc_embedding, self.pre_fc_norm_embedding(input_embeds))
         orig_shape = hidden_states.shape
         hidden_states = self.pre_fc_norm_hidden(hidden_states)
         decoder_view = hidden_states.view(
             *hidden_states.shape[:-1], self.hc_count, self.hidden_size
         )
-        encoder_inputs = self.fc_hidden(decoder_view)
+        encoder_inputs = self._fc_int8(self.fc_hidden, decoder_view)
         return (input_embeds.unsqueeze(-2) + encoder_inputs).view(orig_shape)
 
     def _fuse_standard(
@@ -267,6 +341,31 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
         assert hc_hidden_states.shape[-1] == self.hc_count * self.hidden_size
         logits_output.hidden_states = hc_hidden_states
 
+    def _qf_int8_linears(self):
+        """Draft-only INT8 (per-row) copies of the MTP layer's remaining BF16 linears (attention qkv, indexer
+        qk). Used for <= 8-row calls through qwenfast; the BF16 weights stay for larger (prefill) calls."""
+        if getattr(self, "_qf_i8_done", False) or not _LIN_INT8 or torch.cuda.is_current_stream_capturing():
+            return
+        from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
+        n = 0
+        for name, mod in self.model.named_modules():
+            w = getattr(mod, "weight", None)
+            if (isinstance(getattr(mod, "quant_method", None), UnquantizedLinearMethod) and isinstance(w, torch.Tensor)
+                    and w.dim() == 2 and w.dtype == torch.bfloat16 and w.is_cuda and w.shape[1] in (640, 2560, 6144)
+                    and getattr(mod, "bias", None) is None and w.shape[0] >= 640 and not name.endswith("gate")):
+                wf = w.float()
+                sc = (wf.abs().amax(dim=1).clamp_min(1e-30) / 127.0).contiguous()
+                mod._qf_i8 = (torch.round(wf / sc[:, None]).clamp_(-127, 127).to(torch.int8).contiguous(), sc)
+                n += 1
+                del wf
+        self._qf_i8_done = True
+        logger.info("Draft-only INT8 copies for %d BF16 linears", n)
+        for name, mod in self.model.named_modules():
+            w = getattr(mod, "weight", None)
+            if isinstance(w, torch.Tensor) and w.dim() == 2 and w.shape[0] >= 512:
+                logger.info("draft module %s %s qm=%s w=%s %s", name, type(mod).__name__,
+                            type(getattr(mod, "quant_method", None)).__name__, tuple(w.shape), w.dtype)
+
     @torch.no_grad()
     def forward(
         self,
@@ -276,6 +375,7 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
         input_embeds: Optional[torch.Tensor] = None,
         **kwargs,
     ):
+        self._qf_int8_linears()
         with self._npu_quant_context():
             input_embeds = self._prepare_input_embeds(
                 input_ids, forward_batch, input_embeds

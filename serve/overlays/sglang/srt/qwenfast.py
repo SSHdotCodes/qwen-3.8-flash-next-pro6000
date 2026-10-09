@@ -7,11 +7,14 @@ stock SGLang path. Weights, dtypes and quantization are unchanged.
   QWENFAST=0          disable all overrides
   QWENFAST_MOE=0      keep FlashInfer CUTLASS for the NVFP4 experts
   QWENFAST_HC=0       keep the stock hyper-connection norm + mix + combine kernels
-  QWENFAST_ROUTER=1   fused router on the main stream (measured no gain: the MoE block is bandwidth-bound)
+  QWENFAST_ROUTER=1   fused router GEMM + top-10 on the main stream (RedHat checkpoint: MoE block 91 -> 83 us)
   QWENFAST_GDN=0      keep the stock GDN output norm + out_proj (default: fused, weights prefetched into L2)
   QWENFAST_GDN_MAXT=4 largest token count for the fused GDN output
   QWENFAST_SAMPLE=0   keep the dense verify sampling (softmax -> top-k/top-p renorm -> chain sampling)
   QWENFAST_QSAMETA=0  keep the single-warp, 128-pages-per-iteration QSA graph page-table build
+  QWENFAST_PK=1       exact 12-bit packed BF16 weights for GDN in_proj / attention qkv + o_proj / lm_head
+                      (QWENFAST_PK_SHAPES, QWENFAST_PK_LMHEAD=0 keeps the head in BF16)
+  QWENFAST_DRAFT_W8=0 keep SGLang's FP8 GEMM for the online-FP8 draft linears (default: weight-only FP8 at <= 8 rows)
   QWENFAST_SO=path    prebuilt extension (smallm_gemm, nvfp4_moe_decode, hc_mix_fused, hc_combine_apply)
 """
 
@@ -19,6 +22,7 @@ import importlib.machinery
 import importlib.util
 import logging
 import os
+import time
 
 import torch
 
@@ -32,6 +36,22 @@ GDN_ENABLED = ENABLED and os.environ.get("QWENFAST_GDN", "1") == "1"
 GDN_MAXT = int(os.environ.get("QWENFAST_GDN_MAXT", "4"))
 SAMPLE_ENABLED = ENABLED and os.environ.get("QWENFAST_SAMPLE", "1") == "1"
 QSAMETA_ENABLED = ENABLED and os.environ.get("QWENFAST_QSAMETA", "1") == "1"
+# Exact 12-bit packing of selected BF16 target weights (bit-identical weights, 75% of the bytes): GDN in_proj,
+# attention qkv + o_proj and the target lm_head. Decode/verify rows (<= 8) use pk_gemm; larger calls unpack to BF16.
+PK_ENABLED = ENABLED and os.environ.get("QWENFAST_PK", "0") == "1"
+PK_SHAPES = {tuple(int(v) for v in k.split("x")) for k in os.environ.get("QWENFAST_PK_SHAPES", "16480x2560,13312x2560,2560x6144").split(",") if k}
+# 2560x6144 is both the attention o_proj and the GDN out_proj; only the former is packed (the latter has a fused
+# norm + out_proj kernel whose packed variant measured slower)
+_PK_NAME_SUFFIX = {(2560, 6144): ".o_proj"}
+PK_LM_HEAD = PK_ENABLED and os.environ.get("QWENFAST_PK_LMHEAD", "1") == "1"
+# Target 8-bit weights ("w8g", qf_w8g.cu): symmetric INT8 with one BF16 scale per 128 weights of a row, for the
+# listed categories of dense BF16 target linears (inproj = GDN in_proj incl. a/b rows, qkv, oproj = attention o_proj,
+# head = lm_head, shared = shared expert, outproj = GDN out_proj, hc = hyper-connection mix). Lossy (~0.8% relative
+# weight error); categories not listed keep pk12 / BF16. Decode rows (<= 8) read the INT8 form directly; larger
+# batches unpack to BF16 and run the stock GEMM.
+W8_CATS = {c for c in os.environ.get("QWENFAST_W8", "").split(",") if c} if ENABLED else set()
+# Draft-only: SGLang's online FP8 draft linears run as weight-only FP8 GEMMs (BF16 activations) at <= 8 rows.
+DRAFT_W8_ENABLED = ENABLED and os.environ.get("QWENFAST_DRAFT_W8", "1") == "1"
 _ext = None
 
 # (N, K) -> {M: (rows per warp, unroll)}; measured against cuBLAS on this GPU (bench_smallm.json)
@@ -112,6 +132,487 @@ def fast_softmax(x: torch.Tensor) -> torch.Tensor:
     return e.div_(e.sum(dim=-1, keepdim=True))
 
 
+
+# ------------------------------------------------------------------------------------------------
+# pk12: exact 12-bit packing (see qf_pk.cu). Packed modules keep a 1-element placeholder parameter; the
+# registry maps its data pointer to (packed dict, first row, last row) so every call site can find it.
+_PK_BY_PTR = {}
+_pk_scratch = {}
+_pk_logged = set()
+
+
+def pk_pack(w: torch.Tensor, rows_per_chunk: int = 8192):
+    assert w.dtype == torch.bfloat16 and w.dim() == 2 and w.is_cuda and w.shape[1] % 16 == 0
+    N, K = w.shape
+    m8 = torch.empty((N, K), dtype=torch.uint8, device=w.device)
+    e4 = torch.empty((N, K // 2), dtype=torch.uint8, device=w.device)
+    base = torch.empty((N,), dtype=torch.uint8, device=w.device)
+    ex_rows, ex_k, ex_v = [], [], []
+    for r0 in range(0, N, rows_per_chunk):
+        r1 = min(N, r0 + rows_per_chunk)
+        u = w[r0:r1].contiguous().view(torch.int16).to(torch.int32) & 0xFFFF
+        exp = (u >> 7) & 0xFF
+        b = (exp.amax(dim=1) - 15).clamp_(min=1)
+        nib = exp - b[:, None]
+        esc = nib <= 0
+        nib = torch.where(esc, 0, nib)
+        m = torch.where(esc, 0, ((u >> 8) & 0x80) | (u & 0x7F))
+        m8[r0:r1] = m.to(torch.uint8)
+        e4[r0:r1] = (nib[:, 0::2] | (nib[:, 1::2] << 4)).to(torch.uint8)
+        base[r0:r1] = b.to(torch.uint8)
+        idx = esc.nonzero()
+        if idx.numel():
+            ex_rows.append(idx[:, 0] + r0)
+            ex_k.append(idx[:, 1])
+            ex_v.append(w[r0:r1][idx[:, 0], idx[:, 1]].float())
+        del u, exp, nib, esc, m, idx
+    if ex_rows:
+        rows = torch.cat(ex_rows); ks = torch.cat(ex_k); vs = torch.cat(ex_v)
+        order = torch.argsort(rows * K + ks)
+        rows, ks, vs = rows[order], ks[order].int(), vs[order]
+    else:
+        rows = torch.zeros(0, dtype=torch.long, device=w.device)
+        ks = torch.zeros(0, dtype=torch.int32, device=w.device)
+        vs = torch.zeros(0, dtype=torch.float32, device=w.device)
+    ptr = torch.zeros(N + 1, dtype=torch.int32, device=w.device)
+    ptr[1:] = torch.bincount(rows, minlength=N).cumsum(0).int()
+    p = dict(m8=m8, e4=e4, base=base, ex_ptr=ptr, ex_k=ks.contiguous(), ex_v=vs.contiguous(), shape=(N, K))
+    # exactness check of this packing (cheap: one unpack into a temporary of the same size, row blocks)
+    for r0 in range(0, N, rows_per_chunk):
+        r1 = min(N, r0 + rows_per_chunk)
+        out = torch.empty((r1 - r0, K), dtype=torch.bfloat16, device=w.device)
+        ext().pk_unpack(m8[r0:r1], e4[r0:r1], base[r0:r1], ptr[r0:r1 + 1], p["ex_k"], p["ex_v"], out)
+        if not torch.equal(out.view(torch.int16), w[r0:r1].view(torch.int16)):
+            raise RuntimeError("qwenfast pk12: packed weights do not reproduce the BF16 original")
+        del out
+    return p
+
+
+def _pk_nbytes(p):
+    return sum(p[k].numel() * p[k].element_size() for k in ("m8", "e4", "base", "ex_ptr", "ex_k", "ex_v"))
+
+
+def _pk_placeholder(param: torch.Tensor, entry):
+    ph = torch.zeros(1, dtype=param.dtype, device=param.device)
+    param.data = ph
+    _PK_BY_PTR[param.data_ptr()] = entry
+    return ph
+
+
+def pk_lookup(w):
+    if not _PK_BY_PTR or not isinstance(w, torch.Tensor) or w.numel() != 1:
+        return None
+    return _PK_BY_PTR.get(w.data_ptr())
+
+
+def _pk_unpack_rows(p, r0, r1):
+    """BF16 rows [r0, r1) of a packed matrix in the shared scratch buffer (valid until the next unpack)."""
+    N, K = p["shape"]
+    dev = p["m8"].device
+    buf = _pk_scratch.get(dev)
+    need = (r1 - r0) * K
+    if buf is None or buf.numel() < need:
+        buf = torch.empty(max(need, 16480 * 2560), dtype=torch.bfloat16, device=dev)
+        _pk_scratch[dev] = buf
+    w = buf[:need].view(r1 - r0, K)
+    ext().pk_unpack(p["m8"][r0:r1], p["e4"][r0:r1], p["base"][r0:r1], p["ex_ptr"][r0:r1 + 1], p["ex_k"], p["ex_v"], w)
+    return w
+
+
+def _pk_rpw(M, K):
+    # measured on this GPU (ext/test_pk.py, test_pk6144.py): K=2560 favours 4 rows per warp from M=2, K=6144 1-2
+    if K == 6144:
+        return 1 if M <= 4 else 2
+    return 1 if M == 1 else 4
+
+
+def pk_linear(entry, x: torch.Tensor, bias=None):
+    if entry[0].get("kind") == "w8":
+        return w8_linear(entry, x, bias)
+    p, r0, r1 = entry
+    N, K = p["shape"]
+    shp = x.shape
+    x2 = x.reshape(-1, K)
+    M = x2.shape[0]
+    n_out = r1 - r0
+    if M == 0:
+        return x.new_empty((*shp[:-1], n_out))
+    if (
+        bias is None and M <= 8 and M * K * 2 <= 99 * 1024 and x2.dtype == torch.bfloat16 and x2.stride(1) == 1
+        and x2.stride(0) % 8 == 0 and x2.data_ptr() % 16 == 0 and not torch.compiler.is_compiling()
+    ):
+        if r0 == 0 and r1 == N:
+            y = ext().pk_gemm(x2, p["m8"], p["e4"], p["base"], p["ex_ptr"], p["ex_k"], p["ex_v"], _pk_rpw(M, K))
+        else:
+            y = ext().pk_gemm(x2, p["m8"][r0:r1], p["e4"][r0:r1], p["base"][r0:r1], p["ex_ptr"][r0:r1 + 1],
+                              p["ex_k"], p["ex_v"], _pk_rpw(M, K))
+        return y.view(*shp[:-1], n_out)
+    key = ("unpack", N, K, M if M <= 8 else ">8")
+    if key not in _pk_logged:
+        _pk_logged.add(key)
+        logger.info("qwenfast pk12: unpack path for %sx%s rows=%s M=%s", N, K, (r0, r1), M)
+    w = _pk_unpack_rows(p, r0, r1)
+    return torch.nn.functional.linear(x2, w, bias).view(*shp[:-1], n_out)
+
+
+def pk_lm_head(p, h: torch.Tensor):
+    if p.get("kind") == "w8":
+        return _w8_lm_head(p, h)
+    N, K = p["shape"]
+    M = h.shape[0]
+    if 1 <= M <= 8 and h.dtype == torch.bfloat16 and h.is_contiguous() and h.data_ptr() % 16 == 0:
+        return ext().pk_gemm(h, p["m8"], p["e4"], p["base"], p["ex_ptr"], p["ex_k"], p["ex_v"], _pk_rpw(M, K))
+    out = torch.empty((M, N), dtype=h.dtype, device=h.device)
+    for r0 in range(0, N, 16384):
+        r1 = min(N, r0 + 16384)
+        out[:, r0:r1] = torch.matmul(h, _pk_unpack_rows(p, r0, r1).T)
+    return out
+
+
+def pk_gather_rows(p, ids: torch.Tensor):
+    """BF16 copies of the given rows of a packed matrix (draft hot-head construction)."""
+    N, K = p["shape"]
+    unpack = _w8_unpack_rows if p.get("kind") == "w8" else _pk_unpack_rows
+    out = torch.empty((ids.numel(), K), dtype=torch.bfloat16, device=ids.device)
+    for r0 in range(0, N, 16384):
+        r1 = min(N, r0 + 16384)
+        sel = ((ids >= r0) & (ids < r1)).nonzero().flatten()
+        if sel.numel():
+            out[sel] = unpack(p, r0, r1).index_select(0, ids[sel] - r0)
+    return out
+
+
+@torch.no_grad()
+def w8_quant(w: torch.Tensor, rows_per_chunk: int = 8192):
+    """BF16 [N, K] -> INT8 q [N, K] + BF16 group scales s [N, K / G] (G = 128, or 64 when K % 128 != 0).
+    Scales are rounded to BF16 before quantizing so q * s is the exact dequantized weight."""
+    N, K = w.shape
+    G = 128 if K % 128 == 0 else 64
+    q = torch.empty((N, K), dtype=torch.int8, device=w.device)
+    sc = torch.empty((N, K // G), dtype=torch.bfloat16, device=w.device)
+    for r0 in range(0, N, rows_per_chunk):
+        r1 = min(N, r0 + rows_per_chunk)
+        xg = w[r0:r1].float().view(r1 - r0, K // G, G)
+        s16 = (xg.abs().amax(2) / 127).clamp_(min=1e-30).to(torch.bfloat16)
+        q[r0:r1] = (xg / s16.float().unsqueeze(-1)).round_().clamp_(-127, 127).to(torch.int8).view(r1 - r0, K)
+        sc[r0:r1] = s16
+        del xg, s16
+    return dict(kind="w8", q=q, s=sc, shape=(N, K), G=G)
+
+
+def _w8_unpack_rows(p, r0, r1):
+    N, K = p["shape"]
+    dev = p["q"].device
+    buf = _pk_scratch.get(dev)
+    need = (r1 - r0) * K
+    if buf is None or buf.numel() < need:
+        buf = torch.empty(max(need, 16480 * 2560), dtype=torch.bfloat16, device=dev)
+        _pk_scratch[dev] = buf
+    w = buf[:need].view(r1 - r0, K)
+    ext().w8g_unpack(p["q"][r0:r1], p["s"][r0:r1], w)
+    return w
+
+
+def _w8_rpw(M, K):
+    # measured (ext/test_w8k.py bench, weights rotated past L2): 2 rows per warp up to 4 tokens; 4 for 5..8 tokens at
+    # K = 2560 (in_proj, qkv, lm_head); K = 6144 / 640 keep 2
+    return 4 if M > 4 and K == 2560 else 2
+
+
+def w8_linear(entry, x: torch.Tensor, bias=None):
+    p, r0, r1 = entry
+    N, K = p["shape"]
+    shp = x.shape
+    x2 = x.reshape(-1, K)
+    M = x2.shape[0]
+    n_out = r1 - r0
+    if M == 0:
+        return x.new_empty((*shp[:-1], n_out))
+    if (
+        bias is None and M <= 8 and p["G"] == 128 and K in (640, 2560, 6144) and x2.dtype == torch.bfloat16
+        and x2.stride(1) == 1 and x2.stride(0) % 8 == 0 and x2.data_ptr() % 16 == 0 and not torch.compiler.is_compiling()
+    ):
+        if r0 == 0 and r1 == N:
+            y = ext().w8g_gemm(x2, p["q"], p["s"], _w8_rpw(M, K))
+        else:
+            y = ext().w8g_gemm(x2, p["q"][r0:r1], p["s"][r0:r1], _w8_rpw(M, K))
+        return y.view(*shp[:-1], n_out)
+    key = ("w8unpack", N, K, M if M <= 8 else ">8")
+    if key not in _pk_logged:
+        _pk_logged.add(key)
+        logger.info("qwenfast w8g: unpack path for %sx%s rows=%s M=%s", N, K, (r0, r1), M)
+    w = _w8_unpack_rows(p, r0, r1)
+    return torch.nn.functional.linear(x2, w, bias).view(*shp[:-1], n_out)
+
+
+def _w8_lm_head(p, h: torch.Tensor):
+    N, K = p["shape"]
+    M = h.shape[0]
+    if 1 <= M <= 8 and h.dtype == torch.bfloat16 and h.is_contiguous() and h.data_ptr() % 16 == 0:
+        return ext().w8g_gemm(h, p["q"], p["s"], _w8_rpw(M, K))
+    out = torch.empty((M, N), dtype=h.dtype, device=h.device)
+    for r0 in range(0, N, 16384):
+        r1 = min(N, r0 + 16384)
+        out[:, r0:r1] = torch.matmul(h, _w8_unpack_rows(p, r0, r1).T)
+    return out
+
+
+def _w8_category(name: str):
+    if "visual" in name:
+        return None
+    leaf = name.split(".")[-1]
+    if leaf == "lm_head":
+        return "head"
+    if name.endswith("linear_attn.out_proj"):
+        return "outproj"
+    if leaf == "qkv_proj":
+        return "qkv"
+    if leaf == "o_proj":
+        return "oproj"
+    if ".shared_expert." in name and leaf in ("gate_up_proj", "down_proj"):
+        return "shared"
+    return None
+
+
+def w8_model(model):
+    """Convert the selected target BF16 linears to w8g (after weights are loaded, before pk12 and graphs)."""
+    from sglang.srt.layers.quantization import unquant
+    t0 = time.time()
+    n = before = after = 0
+    seen = {}
+    for name, mod in model.named_modules():
+        fused = getattr(mod, "_fused_in_proj_weight", None)
+        if "inproj" in W8_CATS and isinstance(fused, torch.Tensor) and fused.dtype == torch.bfloat16 and fused.dim() == 2:
+            p = w8_quant(fused)
+            N = fused.shape[0]
+            wq = mod._fused_in_proj_qkvz_width
+            mod._fused_in_proj_weight = _pk_placeholder(torch.empty(0, dtype=fused.dtype, device=fused.device), (p, 0, N))
+            _pk_placeholder(mod.in_proj_qkvz.weight, (p, 0, wq))
+            _pk_placeholder(mod.in_proj_ba.weight, (p, wq, N))
+            before += fused.numel() * 2; after += p["q"].numel() + p["s"].numel() * 2; n += 1
+            seen["inproj"] = seen.get("inproj", 0) + 1
+            del fused
+            continue
+        if "hc" in W8_CATS and "visual" not in name and hasattr(mod, "input_mix_weight_down") and hasattr(mod, "input_mix_weight_up"):
+            wd, wu = mod.input_mix_weight_down.weight, mod.input_mix_weight_up.weight
+            if (wd.dtype == torch.bfloat16 and tuple(wd.shape) == (320, 10240) and tuple(wu.shape) == (10240, 320)):
+                pd, pu = w8_quant(wd.data), w8_quant(wu.data)
+                # decode reads the INT8 copies; the BF16 parameters become the exact dequantized weights so every
+                # other path (prefill mix) computes with the same weights
+                ext().w8g_unpack(pd["q"], pd["s"], wd.data)
+                ext().w8g_unpack(pu["q"], pu["s"], wu.data)
+                mod._qf_w8hc = (pd["q"], pd["s"], pu["q"], pu["s"])
+                before += (wd.numel() + wu.numel()) * 2
+                after += pd["q"].numel() + pu["q"].numel() + 2 * (pd["s"].numel() + pu["s"].numel())
+                n += 1
+                seen["hc"] = seen.get("hc", 0) + 1
+            continue
+        w = getattr(mod, "weight", None)
+        if not isinstance(w, torch.Tensor) or w.dim() != 2 or w.dtype != torch.bfloat16 or not w.is_cuda:
+            continue
+        cat = _w8_category(name)
+        if cat is None or cat not in W8_CATS:
+            continue
+        is_head = cat == "head"
+        if not is_head and not (isinstance(getattr(mod, "quant_method", None), unquant.UnquantizedLinearMethod)
+                                and getattr(mod, "bias", None) is None):
+            continue
+        if cat == "outproj":
+            mod._qf_w8_outproj = True
+        p = w8_quant(w.data)
+        before += w.numel() * 2; after += p["q"].numel() + p["s"].numel() * 2; n += 1
+        seen[cat] = seen.get(cat, 0) + 1
+        if is_head:
+            mod._qf_pk = p
+        _pk_placeholder(w, (p, 0, w.shape[0]))
+    torch.cuda.empty_cache()
+    logger.info("qwenfast w8g: %d matrices %s, %.2f GB -> %.2f GB, %.1f s", n, seen, before / 1e9, after / 1e9,
+                time.time() - t0)
+
+
+def pk_model(model):
+    """Pack the target's BF16 GDN in_proj / attention qkv / lm_head (after weights are loaded, before graphs)."""
+    import time
+    from sglang.srt.layers.quantization import unquant
+    t0 = time.time()
+    n = before = after = nex = 0
+    for name, mod in model.named_modules():
+        fused = getattr(mod, "_fused_in_proj_weight", None)
+        if isinstance(fused, torch.Tensor) and fused.dtype == torch.bfloat16 and tuple(fused.shape) in PK_SHAPES:
+            p = pk_pack(fused)
+            N = fused.shape[0]
+            wq = mod._fused_in_proj_qkvz_width
+            entry = (p, 0, N)
+            mod._fused_in_proj_weight = _pk_placeholder(torch.empty(0, dtype=fused.dtype, device=fused.device), entry)
+            _pk_placeholder(mod.in_proj_qkvz.weight, (p, 0, wq))
+            _pk_placeholder(mod.in_proj_ba.weight, (p, wq, N))
+            before += fused.numel() * 2; after += _pk_nbytes(p); nex += p["ex_k"].numel(); n += 1
+            del fused
+            continue
+        w = getattr(mod, "weight", None)
+        if not isinstance(w, torch.Tensor) or w.dim() != 2 or w.dtype != torch.bfloat16 or not w.is_cuda:
+            continue
+        is_lin = (isinstance(getattr(mod, "quant_method", None), unquant.UnquantizedLinearMethod)
+                  and tuple(w.shape) in PK_SHAPES and getattr(mod, "bias", None) is None
+                  and name.endswith(_PK_NAME_SUFFIX.get(tuple(w.shape), "")))
+        is_head = PK_LM_HEAD and name.split(".")[-1] == "lm_head" and tuple(w.shape) == (248320, 2560)
+        if not (is_lin or is_head):
+            continue
+        p = pk_pack(w.data)
+        before += w.numel() * 2; after += _pk_nbytes(p); nex += p["ex_k"].numel(); n += 1
+        N = w.shape[0]
+        if is_head:
+            mod._qf_pk = p
+        _pk_placeholder(w, (p, 0, N))
+    torch.cuda.empty_cache()
+    logger.info("qwenfast pk12: packed %d matrices, %.2f GB -> %.2f GB (%d exception values), exact, %.1f s",
+                n, before / 1e9, after / 1e9, nex, time.time() - t0)
+
+
+# Evaluation only: fake-quantize selected target BF16 weights in place (quantize -> dequantize to BF16) so the
+# KLD harness measures what an 8-bit weight format would cost before any kernel exists.
+#   QWENFAST_FQ=inproj,inproj_ba,outproj,qkv,oproj,head,hc,shared,router,ple,index   QWENFAST_FQ_FMT=i8g128|i8row|f8row
+FQ_CATS = {c for c in os.environ.get("QWENFAST_FQ", "").split(",") if c}
+FQ_FMT = os.environ.get("QWENFAST_FQ_FMT", "i8g128")
+
+
+@torch.no_grad()
+def _fq_rows(w: torch.Tensor, fmt: str):
+    N, K = w.shape
+    for r0 in range(0, N, 4096):
+        r1 = min(N, r0 + 4096)
+        x = w[r0:r1].float()
+        if fmt.startswith("i8g"):
+            g = int(fmt[3:])
+            g = g if K % g == 0 else 64
+            xg = x.view(r1 - r0, K // g, g)
+            s = (xg.abs().amax(2, keepdim=True) / 127).clamp_(min=1e-30).to(torch.bfloat16).float()
+            x = ((xg / s).round_().clamp_(-127, 127) * s).view(r1 - r0, K)
+        elif fmt == "i8row":
+            s = (x.abs().amax(1, keepdim=True) / 127).clamp_(min=1e-30)
+            x = (x / s).round_().clamp_(-127, 127) * s
+        elif fmt == "f8row":
+            s = (x.abs().amax(1, keepdim=True) / 448).clamp_(min=1e-30)
+            x = (x / s).to(torch.float8_e4m3fn).float() * s
+        else:
+            raise ValueError(fmt)
+        w[r0:r1].copy_(x.to(torch.bfloat16))
+
+
+def _fq_category(name: str, w: torch.Tensor):
+    if "visual" in name or "mtp" in name.split(".")[0]:
+        return None
+    leaf = name.split(".")[-1]
+    if leaf == "lm_head":
+        return "head"
+    if name.endswith("linear_attn.out_proj"):
+        return "outproj"
+    if leaf == "qkv_proj":          # full-attention layers (".self_attn" is stripped from module names)
+        return "qkv"
+    if leaf == "o_proj":
+        return "oproj"
+    if leaf in ("input_mix_weight_down", "input_mix_weight_up"):
+        return "hc"
+    if ".shared_expert." in name and leaf in ("gate_up_proj", "down_proj"):
+        return "shared"
+    if name.endswith("mlp.gate"):
+        return "router"
+    if leaf in ("key_proj", "value_proj") and ".ple" in name:
+        return "ple"
+    if "index" in leaf and leaf.endswith("proj"):
+        return "index"
+    return None
+
+
+def fq_model(model):
+    import collections
+    t0 = time.time()
+    seen = collections.Counter()
+    for name, mod in model.named_modules():
+        fused = getattr(mod, "_fused_in_proj_weight", None)
+        if isinstance(fused, torch.Tensor) and fused.dtype == torch.bfloat16 and fused.dim() == 2:
+            wq = mod._fused_in_proj_qkvz_width
+            if "inproj" in FQ_CATS:
+                _fq_rows(fused[:wq], FQ_FMT); seen["inproj"] += fused[:wq].numel()
+            if "inproj_ba" in FQ_CATS:
+                _fq_rows(fused[wq:], FQ_FMT); seen["inproj_ba"] += fused[wq:].numel()
+            continue
+        w = getattr(mod, "weight", None)
+        if not isinstance(w, torch.Tensor) or w.dim() != 2 or w.dtype != torch.bfloat16 or not w.is_cuda:
+            continue
+        cat = _fq_category(name, w)
+        if cat is None or cat not in FQ_CATS:
+            continue
+        if cat == "outproj" and "in_proj" in name:
+            continue
+        _fq_rows(w.data, FQ_FMT)
+        seen[cat] += w.numel()
+    logger.info("qwenfast FQ (%s): fake-quantized %s in %.1f s", FQ_FMT,
+                {k: f"{v / 1e9:.3f}G params" for k, v in sorted(seen.items())}, time.time() - t0)
+
+
+def _install_pk():
+    from sglang.srt.model_loader import loader as ld
+    orig = ld.DefaultModelLoader.postprocess_weights
+
+    def postprocess_weights(model, target_device):
+        orig(model, target_device)
+        if type(model).__name__ == "Qwen4ExpForConditionalGeneration":
+            if FQ_CATS:
+                fq_model(model)
+            if W8_CATS:
+                w8_model(model)
+            if PK_ENABLED:
+                pk_model(model)
+
+    ld.DefaultModelLoader.postprocess_weights = staticmethod(postprocess_weights)
+    logger.info("qwenfast pk12: target weight packing hook installed (shapes %s, lm_head %s)", sorted(PK_SHAPES), PK_LM_HEAD)
+
+def w8_rows_ok(x2: torch.Tensor) -> bool:
+    return (x2.dim() == 2 and 1 <= x2.shape[0] <= 8 and x2.dtype == torch.bfloat16 and x2.stride(1) == 1
+            and x2.stride(0) % 8 == 0 and x2.data_ptr() % 16 == 0 and not torch.compiler.is_compiling())
+
+
+def _install_draft_w8():
+    """Weight-only FP8 GEMM for the online-FP8 MTP draft (the only Fp8LinearMethod user in this deployment):
+    same FP8 weights and per-channel scales, BF16 activations instead of per-token FP8. Changes draft
+    acceptance only (exact rejection sampling); CUTLASS FP8 tiles launch 5-20 CTAs at these sizes."""
+    from sglang.srt.layers.quantization import fp8 as f8
+    orig = f8.Fp8LinearMethod.apply
+    logged = set()
+
+    def apply(self, layer, x, bias=None):
+        w = getattr(layer, "weight", None)
+        if (
+            bias is None and isinstance(x, torch.Tensor) and isinstance(w, torch.Tensor)
+            and w.dtype == torch.float8_e4m3fn and w.dim() == 2
+            and not getattr(self, "block_quant", False) and not getattr(self, "use_marlin", False)
+            and getattr(layer, "input_scale", None) is None
+        ):
+            K, N = w.shape
+            q = w.t()
+            ws = getattr(layer, "weight_scale", None)
+            if (q.is_contiguous() and K in (640, 2560, 6144) and isinstance(ws, torch.Tensor)
+                    and ws.dtype == torch.float32 and ws.numel() in (1, N) and ws.is_contiguous()):
+                x2 = x.reshape(-1, K)
+                if w8_rows_ok(x2):
+                    if (N, K) not in logged:
+                        logged.add((N, K))
+                        logger.info("qwenfast: draft weight-only FP8 GEMM active for %sx%s", N, K)
+                    return ext().w8_gemm(x2, q, ws.view(-1), 0).view(*x.shape[:-1], N)
+        if isinstance(w, torch.Tensor) and w.dim() == 2 and ("decl", tuple(w.shape)) not in logged:
+            logged.add(("decl", tuple(w.shape)))
+            ws = getattr(layer, "weight_scale", None)
+            logger.info("qwenfast: draft FP8 GEMM declined: %s w=%s %s stride=%s ws=%s %s input_scale=%s bias=%s x=%s",
+                        type(layer).__name__, tuple(w.shape), w.dtype, w.stride(), None if ws is None else tuple(ws.shape),
+                        None if ws is None else ws.dtype, getattr(layer, "input_scale", None) is not None, bias is not None,
+                        None if not isinstance(x, torch.Tensor) else (tuple(x.shape), x.dtype, x.stride()))
+        return orig(self, layer, x, bias)
+
+    f8.Fp8LinearMethod.apply = apply
+    logger.info("qwenfast: draft weight-only FP8 linear override installed")
+
+
 def _install():
     from sglang.srt.layers.quantization import unquant
     from sglang.srt.layers import logits_processor as lp
@@ -119,18 +620,42 @@ def _install():
     orig_apply = unquant.UnquantizedLinearMethod.apply
 
     def apply(self, layer, x, bias=None):
+        # GDN out_proj first: its input may be the deferred gated-norm placeholder (materialized or fused there)
         if _gdn_state["gdn"] is not None and _gdn_state["pending"]:
             y = _gdn_out_proj(layer, x, bias)
             if y is not None:
                 return y
+        entry = pk_lookup(getattr(layer, "weight", None))
+        if entry is not None:
+            return pk_linear(entry, x, bias)
+        i8 = getattr(layer, "_qf_i8", None)   # draft-only INT8 copy (set by the MTP model)
+        if i8 is not None and bias is None and x.is_cuda:
+            x2 = x.reshape(-1, x.shape[-1])
+            if w8_rows_ok(x2):
+                return ext().w8_gemm(x2, i8[0], i8[1], 0).view(*x.shape[:-1], i8[0].shape[0])
         y = try_smallm(x, layer.weight, bias) if x.is_cuda else None
         return y if y is not None else orig_apply(self, layer, x, bias)
 
     unquant.UnquantizedLinearMethod.apply = apply
 
+    orig_apply_into = getattr(unquant.UnquantizedLinearMethod, "apply_into", None)
+    if orig_apply_into is not None:
+        def apply_into(self, layer, x, output, bias=None):
+            entry = pk_lookup(getattr(layer, "weight", None))
+            if entry is not None:
+                output.copy_(pk_linear(entry, x, bias).view_as(output))
+                return output
+            return orig_apply_into(self, layer, x, output, bias)
+
+        unquant.UnquantizedLinearMethod.apply_into = apply_into
+
     orig_impl = unquant._bf16_gemm_dispatch_impl
 
     def dispatch_impl(x, weight, bias, addend=None):
+        entry = pk_lookup(weight)
+        if entry is not None:
+            y = pk_linear(entry, x, bias)
+            return y if addend is None else y + addend
         if addend is None:
             y = try_smallm(x, weight, bias)
             if y is not None:
@@ -142,6 +667,10 @@ def _install():
     orig_lm = lp.LogitsProcessor._compute_lm_head
 
     def compute_lm_head(self, hidden_states, lm_head, embedding_bias=None):
+        p = getattr(lm_head, "_qf_pk", None)
+        if p is not None:
+            assert embedding_bias is None and not self.use_fp32_lm_head
+            return pk_lm_head(p, hidden_states.to(torch.bfloat16))
         # Same branch the stock code takes for a plain BF16 head (torch.matmul), nothing else.
         if (
             embedding_bias is None
@@ -169,6 +698,10 @@ def _install():
         _install_gdn()
     if QSAMETA_ENABLED:
         _install_qsa_meta()
+    if PK_ENABLED or W8_CATS or FQ_CATS:
+        _install_pk()
+    if DRAFT_W8_ENABLED:
+        _install_draft_w8()
 
 
 def _install_moe():
@@ -327,6 +860,13 @@ def _install_hc():
             logger.info("qwenfast: hc fast path active")
         winj = self.block_inject_weight.weight if hasattr(self, "block_inject_weight") else None
         normed, partial, bar = _hc_bufs(hyper_input.device)
+        w8 = getattr(self, "_qf_w8hc", None)
+        if w8 is not None:
+            out, inj = ext().hc_mix_fused_w8(
+                hyper_input, self.hc_norm.weight, w8[0], w8[1], winj, w8[2], w8[3],
+                self.hc_norm.variance_epsilon, normed, partial, bar, True,
+            )
+            return out, (hyper_input, inj)
         out, inj = ext().hc_mix_fused(
             hyper_input, self.hc_norm.weight, self.input_mix_weight_down.weight, winj,
             self.input_mix_weight_up.weight, self.hc_norm.variance_epsilon, normed, partial, bar, True,
@@ -397,7 +937,7 @@ def _install_router():
              and cfg.output_format is None),
             ("waterfill", not getattr(self.topk, "enable_waterfill", False)
              and getattr(self.topk, "waterfill_balancer", None) is None),
-            ("backend", get_moe_runner_backend().is_flashinfer_cutlass()),
+            ("backend", True),
             ("simulate", not tk.envs.SGLANG_SIMULATE_UNIFORM_EXPERTS.get()
              and not tk.envs.SGLANG_SIMULATE_ROUND_ROBIN_EXPERTS.get()),
             ("compile", not torch.compiler.is_compiling()),
@@ -415,7 +955,7 @@ def _install_router():
             return orig(self, hidden_states, use_fused_gate=use_fused_gate, defer_finalize=defer_finalize)
         if "on" not in logged:
             logged.add("on")
-            logger.info("qwenfast: router fast path active")
+            logger.info("qwenfast: router fast path active (experts quant method %s)", type(getattr(self.experts, "quant_method", None)).__name__)
         # Shared expert forks first (it needs SM slots before the routed experts' CTAs fill the GPU); the
         # router follows the mix directly on the main stream so it can prefetch its weight under PDL.
         cur = torch.cuda.current_stream()
@@ -453,6 +993,15 @@ def _gdn_out_proj(layer, x, bias):
         return None
     core, z, norm, placeholder = item
     w = layer.weight
+    entry = pk_lookup(w)
+    if entry is not None:
+        p = entry[0]
+        if (p.get("kind") == "w8" and bias is None and x.dim() == 2 and x.shape == (core.shape[0] // 48, 6144)
+                and p["shape"] == (2560, 6144) and entry[1] == 0 and entry[2] == 2560):
+            return ext().gdn_norm_oproj_w8(core, z, norm.weight, norm.eps, norm.activation != "sigmoid", p["q"], p["s"],
+                                           True, True)
+        placeholder.copy_(_gdn_state["norm_forward"](norm, core, z))
+        return None
     if (
         bias is None
         and x.dim() == 2

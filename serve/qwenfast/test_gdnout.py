@@ -1,16 +1,15 @@
 """Fused GDN gated RMSNorm + out_proj vs sglang's RMSNormGated (fla Triton) + BF16 linear, real layer weights."""
-import os, json, sys
+import json, sys
 import torch
 import torch.nn.functional as F
 from safetensors import safe_open
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+sys.path.insert(0, '/w/ext')
 from build_qf import build
 qf = build()
 from sglang.kernels.ops.attention.fla.layernorm_gated import RMSNorm as RMSNormGated
 
-SNAP = os.environ.get('QWEN_SNAPSHOT', '/root/.cache/huggingface/hub/models--RadixArk--Qwen3.8-Flash-Next-NVFP4/snapshots/7b719225242aacd3dbd3f9407468c2ee9a9d2594')
+SNAP = '/models/hub/models--RadixArk--Qwen3.8-Flash-Next-NVFP4/snapshots/7b719225242aacd3dbd3f9407468c2ee9a9d2594'
 idx = json.load(open(f'{SNAP}/model.safetensors.index.json'))['weight_map']
 cfg = json.load(open(f'{SNAP}/config.json'))
 cfg = cfg.get('text_config', cfg)
@@ -69,4 +68,4 @@ for layer in (0, 1, 46):
                    mine_nopdl_us=round(timeit(lambda i: mine(cores[i], zs[i], False, True, i)), 2))
         res.append(row)
         print(json.dumps(row), flush=True)
-json.dump(res, open(os.environ.get('QWENFAST_TEST_OUT', '/tmp') + '/test_gdnout.json', 'w'), indent=1)
+json.dump(res, open('/w/ext/test_gdnout.json', 'w'), indent=1)

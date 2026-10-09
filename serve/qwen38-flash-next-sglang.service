@@ -1,5 +1,5 @@
 [Unit]
-Description=Qwen3.8-Flash-Next SGLang 0.5.20, 262K context and exact MTP sampling
+Description=Qwen3.8-Flash-Next SGLang 0.5.21, 262K context and exact MTP sampling
 After=docker.service network-online.target
 Requires=docker.service
 Wants=network-online.target

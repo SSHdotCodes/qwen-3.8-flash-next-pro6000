@@ -1,9 +1,8 @@
 """Sparse verify sampling (topk + fused renorm/chain kernel) vs sglang's dense softmax -> top_k_renorm ->
 top_p_renorm -> chain_speculative_sampling_triton, same logits / draft probs / coins."""
-import os, json, sys
+import json, sys
 import torch
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+sys.path.insert(0, '/w/ext')
 from build_qf import build
 qf = build()
 from sgl_kernel import top_k_renorm_prob, top_p_renorm_prob
@@ -105,4 +104,4 @@ for bs in (1, 2):
     row = dict(bs=bs, stock_us=round(t_stock, 1), mine_us=round(t_mine, 1), topk_only_us=round(t_topk, 1))
     res.append(row)
     print(json.dumps(row), flush=True)
-json.dump(res, open(os.environ.get('QWENFAST_TEST_OUT', '/tmp') + '/test_sample.json', 'w'), indent=1)
+json.dump(res, open('/w/ext/test_sample.json', 'w'), indent=1)

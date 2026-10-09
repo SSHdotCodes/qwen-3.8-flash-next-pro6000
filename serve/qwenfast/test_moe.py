@@ -3,21 +3,20 @@ import json, os, sys, time
 import torch
 from safetensors import safe_open
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+sys.path.insert(0, '/w/src')
 from build_qf import build
 qf = build()
 
 from flashinfer.fused_moe import cutlass_fused_moe
 from sglang.srt.layers.quantization.utils import swizzle_blockscale
 
-SNAP = os.environ.get('QWEN_SNAPSHOT', '/root/.cache/huggingface/hub/models--RadixArk--Qwen3.8-Flash-Next-NVFP4/snapshots/7b719225242aacd3dbd3f9407468c2ee9a9d2594')
+SNAP = '/models/hub/models--RedHatAI--Qwen3.8-Flash-Next-NVFP4/snapshots/c8f2fb1b9869f686b214782036123b10ff96d14a'
 LAYER = int(os.environ.get('LAYER', '0'))
 E, H, I, K = 512, 2560, 640, 10
 dev = 'cuda'
 torch.manual_seed(0)
 
-idx = json.load(open(f'{SNAP}/model.safetensors.index.json'))['weight_map']
+idx = json.load(open(os.environ.get('INDEX_PATH', f'{SNAP}/model.safetensors.index.json')))['weight_map']
 pre = f'model.language_model.layers.{LAYER}.mlp.'
 
 
@@ -37,7 +36,7 @@ t0 = time.time()
 names = []
 for e in range(E):
     for p in ('gate_proj', 'up_proj', 'down_proj'):
-        for s in ('weight', 'weight_scale', 'weight_scale_2', 'input_scale'):
+        for s in ('weight_packed', 'weight_scale', 'weight_global_scale', 'input_global_scale'):
             names.append(f'{pre}experts.{e}.{p}.{s}')
 names.append(pre + 'gate.weight')
 T_ = load(names)
@@ -48,10 +47,10 @@ def stack(p, s):
     return torch.stack([T_[f'{pre}experts.{e}.{p}.{s}'] for e in range(E)])
 
 
-gate_w, up_w, down_w = stack('gate_proj', 'weight'), stack('up_proj', 'weight'), stack('down_proj', 'weight')
+gate_w, up_w, down_w = stack('gate_proj', 'weight_packed'), stack('up_proj', 'weight_packed'), stack('down_proj', 'weight_packed')
 gate_sf, up_sf, down_sf = stack('gate_proj', 'weight_scale'), stack('up_proj', 'weight_scale'), stack('down_proj', 'weight_scale')
-gate_s2, up_s2, down_s2 = [stack(p, 'weight_scale_2').float().reshape(E) for p in ('gate_proj', 'up_proj', 'down_proj')]
-gate_in, up_in, down_in = [stack(p, 'input_scale').float().reshape(E) for p in ('gate_proj', 'up_proj', 'down_proj')]
+gate_s2, up_s2, down_s2 = [1 / stack(p, 'weight_global_scale').float().reshape(E) for p in ('gate_proj', 'up_proj', 'down_proj')]
+gate_in, up_in, down_in = [1 / stack(p, 'input_global_scale').float().reshape(E) for p in ('gate_proj', 'up_proj', 'down_proj')]
 router = T_[pre + 'gate.weight']
 print('shapes', gate_w.shape, gate_w.dtype, gate_sf.shape, gate_sf.dtype, down_w.shape, down_sf.shape)
 print('gate_s2 == up_s2:', torch.equal(gate_s2, up_s2), 'max |diff|', (gate_s2 - up_s2).abs().max().item())
@@ -63,8 +62,8 @@ w13_sf_raw = torch.cat([up_sf, gate_sf], 1).contiguous()
 w13_sf = swizzle_blockscale(w13_sf_raw).contiguous()
 w2 = down_w.contiguous()
 w2_sf = swizzle_blockscale(down_sf.contiguous()).contiguous()
-w13_input_scale = torch.maximum(gate_in, up_in).max().float()
-w2_input_scale = down_in.max().float()
+w13_input_scale = torch.maximum(gate_in, up_in).float().contiguous()
+w2_input_scale = down_in.float().contiguous()
 g1_alphas = (w13_input_scale * gate_s2).float().contiguous()
 g2_alphas = (w2_input_scale * down_s2).float().contiguous()
 a1_gs = (1 / w13_input_scale).float()
@@ -156,9 +155,10 @@ for T in (1, 2, 4, 8):
     row = dict(T=T, unique_experts=round(uniq, 1), rel_l2_vs_flashinfer=max(errs), deterministic=det,
                vs_bf16_act_ref_flashinfer_mine=errs_ref,
                flashinfer_us=round(t_fi, 1), mine_us=round(t_me, 1))
+    assert row['deterministic'] and row['rel_l2_vs_flashinfer'] < 0.02, row
     results.append(row)
     print(json.dumps(row), flush=True)
-json.dump(results, open(os.environ.get('QWENFAST_TEST_OUT', '/tmp') + '/test_moe.json', 'w'), indent=1)
+json.dump(results, open('/w/src/test_moe-layer'+str(LAYER)+'.json', 'w'), indent=1)
 
 if os.environ.get('PROFILE'):
     from torch.profiler import profile, ProfilerActivity

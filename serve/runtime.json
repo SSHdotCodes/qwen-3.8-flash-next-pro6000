@@ -1,12 +1,13 @@
 {
-  "release": "0.5.20-pro6000-20260924-qwenfast",
-  "sglang_version": "0.5.20",
-  "base_image": "lmsysorg/sglang@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f",
-  "measured_local_image_digest": "sha256:82f053fbd605f9fbfd4d6bd7c3e7b28a216e06ae600ae26e71be8eac58e827ac",
-  "model": "RadixArk/Qwen3.8-Flash-Next-NVFP4",
-  "model_revision": "7b719225242aacd3dbd3f9407468c2ee9a9d2594",
+  "release": "0.5.21-pro6000-20261009-a16",
+  "sglang_version": "0.5.21",
+  "base_image": "lmsysorg/sglang@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469",
+  "measured_local_image_digest": "sha256:ed0946e2e6d5c9859683adca049fc5dd517c3d11f7de99f77e27d7e0f2532ccb",
+  "model": "RedHatAI/Qwen3.8-Flash-Next-NVFP4",
+  "model_revision": "c8f2fb1b9869f686b214782036123b10ff96d14a",
+  "draft_hot_ids": 97800,
   "packages": {
-    "sglang": "0.5.20",
+    "sglang": "0.5.21",
     "torch": "2.13.0+cu130",
     "sglang-kernel": "0.4.7",
     "flashinfer-python": "0.6.18",
@@ -19,34 +20,9 @@
   },
   "files": [
     {
-      "path": "sglang/srt/layers/attention/qwen_sparse_attn_backend.py",
-      "container_path": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py",
-      "sha256": "1303c1ab3d1abe34419ab1f86a16f839b46e4abc48d2c4aaf9839e067d99e363"
-    },
-    {
-      "path": "sglang/srt/layers/attention/qsa/sparse_attn.py",
-      "container_path": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qsa/sparse_attn.py",
-      "sha256": "b214690392b16815590ab6aa4652c0cda3a559c86787b5928959f461c3c83280"
-    },
-    {
-      "path": "sglang/srt/models/qwen4_exp_mtp.py",
-      "container_path": "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp_mtp.py",
-      "sha256": "67c8f5af3ccd5c6a027634164d7f71a3c53c18a4cc4c24dd7dda4ad38a14cbf5"
-    },
-    {
-      "path": "sglang/srt/model_loader/loader.py",
-      "container_path": "/sgl-workspace/sglang/python/sglang/srt/model_loader/loader.py",
-      "sha256": "4478a3deb4c0f8022033447896b280450f8b07623df8781ee7a6492b8bf6600e"
-    },
-    {
-      "path": "sglang/srt/models/qwen4_exp.py",
-      "container_path": "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py",
-      "sha256": "8086b6d7842433971d9f9036e068035ded6901cf649b89aacd1033037cdb5d7a"
-    },
-    {
-      "path": "sglang/srt/speculative/eagle_worker_v2.py",
-      "container_path": "/sgl-workspace/sglang/python/sglang/srt/speculative/eagle_worker_v2.py",
-      "sha256": "15c7e15c9098b11ba7de43cfc062b017cbb7a3a2a1dc2fedde7224e9a054e94b"
+      "path": "sglang/srt/layers/attention/qsa/graph_metadata.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qsa/graph_metadata.py",
+      "sha256": "710d9e79dc7fbe88cb1060165740bce3d4bc6fcd3bcb42f3e1d0e71b28d85dea"
     },
     {
       "path": "sglang/srt/layers/attention/qsa/metadata.py",
@@ -54,34 +30,64 @@
       "sha256": "dcc12d7a4525acc587261a56bc634a4063b2f860231487526ebd0c358b5b6984"
     },
     {
-      "path": "sglang/srt/layers/attention/qsa/graph_metadata.py",
-      "container_path": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qsa/graph_metadata.py",
-      "sha256": "710d9e79dc7fbe88cb1060165740bce3d4bc6fcd3bcb42f3e1d0e71b28d85dea"
-    },
-    {
       "path": "sglang/srt/layers/attention/qsa/qsa_indexer.py",
       "container_path": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qsa/qsa_indexer.py",
-      "sha256": "80717f165c70f328aab9b96b04e701811b2db3dbe17c505344e609f62464ec7d"
+      "sha256": "9235a88c32c24def77e195c221023ca71c9d70e85366dcd0f0c22c497e59f415"
+    },
+    {
+      "path": "sglang/srt/layers/attention/qwen_sparse_attn_backend.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/qwen_sparse_attn_backend.py",
+      "sha256": "c0ef4b2fb077af48a6ec48415565f494d885c8ed79e6f9a4df8d62291c7ec28b"
+    },
+    {
+      "path": "sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py",
+      "sha256": "7c750c2c6f6e6433be95a73db0d635308a7a00169bf5a44da9566295c3654621"
     },
     {
       "path": "sglang/srt/mem_cache/qsa_kv_pool.py",
       "container_path": "/sgl-workspace/sglang/python/sglang/srt/mem_cache/qsa_kv_pool.py",
-      "sha256": "f352a79a36f04721d8702700555407a4808d86498378c6ac092d0aada546f431"
+      "sha256": "36da787ef637d7578ab1d8e7f7f4f68b84cfc967f44e66973b1b0b4d92fadd73"
     },
     {
-      "path": "sglang/srt/speculative/eagle_utils.py",
-      "container_path": "/sgl-workspace/sglang/python/sglang/srt/speculative/eagle_utils.py",
-      "sha256": "ce0af241c13223c6204776d0e5aa1e277abcff1aaf701691b4a1631f5baa0534"
+      "path": "sglang/srt/model_loader/loader.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/model_loader/loader.py",
+      "sha256": "4130404a94b4f6d3ee97d1bf37906215f223698250172b99b9660c6628840512"
+    },
+    {
+      "path": "sglang/srt/models/qwen4_exp.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py",
+      "sha256": "dcb8ffbb0f1edb59edd3d6040b26a546a201bcd94765adf15f2fb26a47359d63"
+    },
+    {
+      "path": "sglang/srt/models/qwen4_exp_mtp.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp_mtp.py",
+      "sha256": "102833aa42d477c6135f8d60c19175dea9b8e6366440bce8abd43b495e836432"
     },
     {
       "path": "sglang/srt/qwenfast.py",
       "container_path": "/sgl-workspace/sglang/python/sglang/srt/qwenfast.py",
-      "sha256": "5f08dd0f3b2790b54ffcf2bb9d9f40ae955e0b52557519830326c54c44da87db"
+      "sha256": "12098fc9384aa123f8a5f34438d5c31650e9b817aaf3b0cb7ddb43b08db49985"
+    },
+    {
+      "path": "sglang/srt/speculative/eagle_draft_cuda_graph_runner.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py",
+      "sha256": "9321bbec296826edb775e03773363e60fcf92751b6e2716ca18d40b868cfa086"
+    },
+    {
+      "path": "sglang/srt/speculative/eagle_utils.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/speculative/eagle_utils.py",
+      "sha256": "52818e0353068d5b8d3b8fca60c2f7ebcfebc53220a8dcc8d39dc1cda3e3f1a3"
+    },
+    {
+      "path": "sglang/srt/speculative/eagle_worker_v2.py",
+      "container_path": "/sgl-workspace/sglang/python/sglang/srt/speculative/eagle_worker_v2.py",
+      "sha256": "fe50813127b07edce47058eb2977f3828568d83bd98c8d1fa20c04296a042c3e"
     },
     {
       "path": "hot-token-ids.json",
       "container_path": "/opt/qwen-mtp-hotmap.json",
-      "sha256": "8a4f4c7c5905b76861a62befa1e060e16362e1775087fbb78e907fd85c4c9c12"
+      "sha256": "2123b2db7f4e1ecd99879db17fcbdd58a887fbb315a45f61c6c83b6ffb04f679"
     }
   ],
   "qwenfast": {
@@ -89,15 +95,22 @@
     "source_dir": "/opt/qwenfast/src",
     "nvcc_flags": "-O3 -gencode=arch=compute_120a,code=sm_120a --use_fast_math -lineinfo (torch.utils.cpp_extension, the image nvcc 13.0)",
     "sources": {
-      "build_qf.py": "053e8c82246ac274919c7d686a1c72f818c5889884c07ac6743f78b60a36f64f",
-      "qf_bind.cpp": "5417e83eb9d207af1b2fbdc1ca53bb0aabc2acc6a646fb7deca5031288c8e88e",
-      "qf_gdnout.cu": "4c7f20eddcdee2f261f32515340f31d995777a79ae447529d9fe72fe6207f05e",
+      "build_qf.py": "65d8a8f493a3633c3f288831af45cde97c99da464a92cb627db11176d64a5fd4",
+      "qf_bind.cpp": "0b37aa822bb1783eb0aa9d64d37d235e8a899b2304d20d3caf83358fd9ab2027",
+      "qf_gdnout.cu": "79f3ff03d1e4808ca2710106d40ab198cb765a176e4cb3c97930ea3ae4f7e41b",
       "qf_hc2.cu": "31e8c17ddf51314474f8d26c7a293106f9d689a0a67457f706de36d82c77d9f2",
+      "qf_hc8.cu": "591bdd60cade62b8ed952a78e1a294da0437f3c14add903c3344177b5b3d27aa",
       "qf_hcmix.cu": "e1af7ba84e6185bbf483517aef83d6b46a50ce6b04ca8349d825cafe710a348f",
-      "qf_moe.cu": "158649bd31de55e60bcb170ccd1ac491e691e579ef8e4e35857099c1a4a75d08",
+      "qf_moe.cu": "a9a91a184c1f816d50863bc3371311ad150ffbd9fe34c2bcdfba0094f323ec18",
+      "qf_pf.cu": "eab935bee6c07213ebcc2fa70ad55d32750178aefe7cc31a0c1b075d2ac17b45",
+      "qf_pk.cu": "ca22809f7335c0e5e8a129dfb6ef56eaec2688463ede30323919668a6e9fdfe1",
       "qf_router.cu": "1ead41909d9bfdbdfa286dbb10de17664c81e2a5e85e1f9ba232050498787430",
       "qf_sample.cu": "2b21eb8e087f74776a65bc2c4e804fa2e1e3dc3f1ff0371aecf953fd2066ea4a",
-      "qf_smallm.cu": "6e00558a1b70bd8384efa9936bc46fdb6c3a3026469edb37c4124fb0e5e4848b"
+      "qf_smallm.cu": "6e00558a1b70bd8384efa9936bc46fdb6c3a3026469edb37c4124fb0e5e4848b",
+      "qf_topk.cu": "0f5b42ea37092555499b45eb9e0f6f72eec7dcfc83783b15d5f25ac3f674d3db",
+      "qf_w4s.cu": "9b7e1e2fd1331b88fdfd1054cb3092bd1cb00180fed05a720e36ac03bee27868",
+      "qf_w8.cu": "ad6a3018f7b407bbac8e2a6948be8be7a38e0f624da231ea99686b89b478e2c4",
+      "qf_w8g.cu": "f5434eb681e711d400c4eb522449a7ad9e707c0dc6962a05c60789b7756fe6d4"
     }
   }
 }
