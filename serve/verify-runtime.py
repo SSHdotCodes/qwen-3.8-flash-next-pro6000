@@ -9,6 +9,16 @@ import json
 from pathlib import Path
 
 
+def build_sources(path):
+    """The SRC list that build_qf.py compiles into qwenfast.so."""
+    for node in ast.parse(path.read_text(), filename=str(path)).body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "SRC" for t in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise ValueError(f"No SRC list in {path}")
+
+
 def verify(installed=False):
     root = Path(__file__).resolve().parent
     manifest = json.loads((root / "runtime.json").read_text())
@@ -24,12 +34,16 @@ def verify(installed=False):
         if path.suffix == ".py":
             ast.parse(data, filename=str(path))
     kernels = manifest["qwenfast"]
+    source_dir = Path(kernels["source_dir"]) if installed else root / "qwenfast"
     for name, expected in kernels["sources"].items():
-        path = (
-            Path(kernels["source_dir"]) / name if installed else root / "qwenfast" / name
-        )
+        path = source_dir / name
         if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
             raise ValueError(f"Kernel source checksum mismatch: {path}")
+    # Every file compiled into qwenfast.so must be pinned in runtime.json, and vice versa.
+    if set(build_sources(source_dir / "build_qf.py")) != set(kernels["sources"]) - {
+        "build_qf.py"
+    }:
+        raise ValueError("build_qf.py sources do not match runtime.json")
     if installed and not Path(kernels["library"]).is_file():
         raise ValueError(f"Missing compiled kernels: {kernels['library']}")
     token_path = (

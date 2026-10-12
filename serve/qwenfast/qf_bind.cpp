@@ -44,6 +44,11 @@ std::vector<at::Tensor> hc_mix_fused_w8(const at::Tensor & x, const at::Tensor &
                                         const at::Tensor & wd_s, const c10::optional<at::Tensor> & winj,
                                         const at::Tensor & wu, const at::Tensor & wu_s, double eps,
                                         at::Tensor & normed, at::Tensor & partial, at::Tensor & bar, bool pdl);
+std::vector<at::Tensor> hc_combine_mix_w8(const at::Tensor & y, const at::Tensor & r, const at::Tensor & inj_prev,
+                                          const at::Tensor & w_norm, const at::Tensor & wd,
+                                          const at::Tensor & wd_s, const c10::optional<at::Tensor> & winj,
+                                          const at::Tensor & wu, const at::Tensor & wu_s, double eps,
+                                          at::Tensor & normed, at::Tensor & partial, at::Tensor & bar, bool pdl);
 std::vector<at::Tensor> topk_rows(const at::Tensor & x, int64_t k);
 at::Tensor w4g_gemm(const at::Tensor & x, const at::Tensor & q, const at::Tensor & s);
 at::Tensor rows_dot_i8(const at::Tensor & x, const at::Tensor & q, const at::Tensor & s, const at::Tensor & idx);
@@ -52,6 +57,15 @@ std::vector<at::Tensor> trunc_sample(const at::Tensor & vals, const at::Tensor &
                                      at::Tensor & q);
 at::Tensor gdn_norm_oproj_w8(const at::Tensor & core, const at::Tensor & z, const at::Tensor & w_norm, double eps,
                              bool swish, const at::Tensor & q, const at::Tensor & sc, bool pdl, bool prefetch);
+
+torch::Tensor a16_moe_decode(torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_w,
+                             torch::Tensor w13, torch::Tensor s13, torch::Tensor gs13,
+                             torch::Tensor w2, torch::Tensor s2, torch::Tensor gs2,
+                             torch::Tensor w_gate, torch::Tensor shared,
+                             torch::Tensor hbuf, torch::Tensor ybuf, torch::Tensor gl, torch::Tensor counters,
+                             torch::Tensor out, int64_t phase, torch::Tensor dbg, torch::Tensor pbuf,
+                             torch::Tensor shq1, torch::Tensor shs1, torch::Tensor shq2, torch::Tensor shs2,
+                             torch::Tensor shbuf);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("smallm_gemm", &smallm_gemm, "small-M bf16 gemm y = x @ w^T", py::arg("x"), py::arg("w"), py::arg("rpw") = 0, py::arg("unroll") = 0);
@@ -79,10 +93,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("w8g_gemm", &w8g_gemm, "small-M gemm on group-scaled int8 weights", py::arg("x"), py::arg("q"), py::arg("s"), py::arg("rpw") = 0);
     m.def("w8g_unpack", &w8g_unpack, "unpack group-scaled int8 weights to bf16");
     m.def("hc_mix_fused_w8", &hc_mix_fused_w8, "hc_mix_fused with int8 group-scaled mix weights");
+    m.def("hc_combine_mix_w8", &hc_combine_mix_w8, "hc_combine_apply + hc_mix_fused_w8 in one kernel (1..8 rows)");
     m.def("gdn_norm_oproj_w8", &gdn_norm_oproj_w8, "GDN gated RMSNorm + int8 group-scaled out_proj");
     m.def("topk_rows", &topk_rows, "row-wise top-k (k <= 64) of long rows, sorted descending");
     m.def("trunc_sample", &trunc_sample, "truncated draft proposal sample from sorted top-K logits");
     m.def("w4g_gemm", &w4g_gemm, "small-M gemm on 4-bit group-scaled weights (draft hot-head screening)");
     m.def("rows_dot_i8", &rows_dot_i8, "exact int8 logits of selected rows (draft hot-head screening)");
+    m.def("a16_moe_decode", &a16_moe_decode, "decode W4A16 routed experts on Marlin-packed NVFP4 + shared gate (1..8 tokens)");
     m.def("spec_topk_chain", &spec_topk_chain, "top-k/top-p renorm on top candidates + chain rejection sampling");
 }

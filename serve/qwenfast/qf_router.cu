@@ -7,6 +7,9 @@
 // Same selection and weights as sglang's _router_triton_kernel (softmax scoring, no bias, no groups).
 // Each warp owns one expert row and requests it before waiting on the previous kernel (programmatic
 // dependent launch); the last CTA to finish (ticket counter, re-armed) does the per-token top-k.
+// The token staging is sized to the batch (5 KB per row) so the CTAs fit beside the preceding hyper-connection
+// mix and their weight requests overlap it; the top-k rounds use redux.sync (max key, then min id) - same
+// selection and tie-breaking as the shuffle tree.
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -45,7 +48,7 @@ __global__ void __launch_bounds__(THREADS) router_topk_kernel(
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
 
     // stage the tokens in shared memory (every warp reads all of them)
-    __shared__ uint4 xs[MAXT * XV];
+    extern __shared__ uint4 xs[];   // [rows * XV]
     {
         constexpr int PER = (MAXT * XV + THREADS - 1) / THREADS;
         uint4 tmp[PER];
@@ -117,29 +120,34 @@ __global__ void __launch_bounds__(THREADS) router_topk_kernel(
 #pragma unroll
         for (int o = 16; o > 0; o >>= 1) sum += __shfl_xor_sync(0xffffffff, sum, o);
 
+        // order-preserving keys (-0 folded onto +0, as float compares see them); 0 = taken
+        unsigned rk[PER_LANE];
+#pragma unroll
+        for (int i = 0; i < PER_LANE; ++i) {
+            unsigned u = __float_as_uint(r[i]);
+            if (u == 0x80000000u) u = 0u;
+            rk[i] = (u & 0x80000000u) ? ~u : (u | 0x80000000u);
+        }
         float my_p = 0.f, routed = 0.f;
         int my_id = 0;
         for (int k = 0; k < topk; ++k) {
             // lane-local best (strict > keeps the lowest expert id: ids grow with i)
-            float bv = -INFINITY;
-            int bi = E;
+            unsigned bk = 0u;
+            unsigned bi = E;
 #pragma unroll
             for (int i = 0; i < PER_LANE; ++i)
-                if (r[i] > bv) { bv = r[i]; bi = i * 32 + lane; }
-#pragma unroll
-            for (int o = 16; o > 0; o >>= 1) {
-                const float ov = __shfl_xor_sync(0xffffffff, bv, o);
-                const int oi = __shfl_xor_sync(0xffffffff, bi, o);
-                if (ov > bv || (ov == bv && oi < bi)) { bv = ov; bi = oi; }
-            }
-            const int owner = bi & 31, slot = bi >> 5;
+                if (rk[i] > bk) { bk = rk[i]; bi = i * 32 + lane; }
+            const unsigned wk = __reduce_max_sync(0xffffffffu, bk);
+            const unsigned wi = __reduce_min_sync(0xffffffffu, bk == wk ? bi : 0xffffffffu);
+            const int bsel = (int) wi;
+            const int owner = bsel & 31, slot = bsel >> 5;
             float p = 0.f;
 #pragma unroll
             for (int i = 0; i < PER_LANE; ++i)
-                if (lane == owner && i == slot) { p = v[i] / sum; r[i] = -INFINITY; }
+                if (lane == owner && i == slot) { p = v[i] / sum; rk[i] = 0u; }
             p = __shfl_sync(0xffffffff, p, owner);
             routed += p;
-            if (lane == k) { my_p = p; my_id = bi; }
+            if (lane == k) { my_p = p; my_id = bsel; }
         }
         if (lane < topk) {
             const float norm = routed > 0.f ? routed : 1.f;
@@ -169,6 +177,7 @@ std::vector<at::Tensor> router_topk(const at::Tensor & x, const at::Tensor & w, 
     cudaLaunchConfig_t cfg = {};
     cfg.gridDim = dim3(E / WARPS);
     cfg.blockDim = dim3(THREADS);
+    cfg.dynamicSmemBytes = (size_t) rows * XV * sizeof(uint4);
     cfg.stream = at::cuda::getCurrentCUDAStream();
     cudaLaunchAttribute lattr[1];
     lattr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;

@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bench"))
+import step_median
 import sustained
 from summarize_sustained import summarize
 
@@ -62,6 +64,10 @@ class LauncherTests(unittest.TestCase):
             "QWENFAST_PK=1",
             "QWENFAST_W8=inproj,qkv,oproj,head,shared,outproj,hc",
             "QWEN_DRAFT_TRUNC=1",
+            "QWENFAST_A16MOE=1",
+            "QWENFAST_W8M=1",
+            "QWENFAST_W8M_PDL=1",
+            "QWENFAST_HCCOMB=1",
         ):
             self.assertIn(env, args)
         self.assertNotIn("--network", args)
@@ -86,6 +92,44 @@ class EvidenceTests(unittest.TestCase):
             [sys.executable, str(ROOT / "serve/verify-runtime.py")], check=True
         )
 
+    def test_kernel_build_list_is_pinned(self):
+        spec = importlib.util.spec_from_file_location(
+            "verify_runtime", ROOT / "serve/verify-runtime.py"
+        )
+        verify_runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verify_runtime)
+        sources = verify_runtime.build_sources(ROOT / "serve/qwenfast/build_qf.py")
+        manifest = json.loads((ROOT / "serve/runtime.json").read_text())
+        self.assertEqual(
+            set(sources), set(manifest["qwenfast"]["sources"]) - {"build_qf.py"}
+        )
+        self.assertIn("qf_a16moe.cu", sources)
+        # qfa16_bind.cpp is the standalone binding for test_a16moe.py; qwenfast.so has one module.
+        self.assertNotIn("qfa16_bind.cpp", sources)
+        self.assertTrue((ROOT / "serve/qwenfast/qfa16_bind.cpp").is_file())
+        bindings = [
+            name
+            for name in sources
+            if "PYBIND11_MODULE" in (ROOT / "serve/qwenfast" / name).read_text()
+        ]
+        self.assertEqual(bindings, ["qf_bind.cpp"])
+
+    def test_october_10_kld_data(self):
+        directory = ROOT / "results/20261010/kld"
+        expected = {
+            "oct9-build-prefill-path.json": (0.011087, 0.1158, 0.9698),
+            "oct9-build-decode-path.json": (0.011134, 0.1189, 0.9695),
+            "oct10-build-decode-path.json": (0.011127, 0.1153, 0.9689),
+        }
+        self.assertEqual(sorted(p.name for p in directory.glob("*.json")), sorted(expected))
+        for name, (kld, p99, top1) in expected.items():
+            data = json.loads((directory / name).read_text())
+            self.assertEqual(data["positions"], 45610, name)
+            self.assertEqual(data["nonfinite"], 0, name)
+            self.assertEqual(round(data["kld"], 6), kld, name)
+            self.assertEqual(round(data["kld_p99"], 4), p99, name)
+            self.assertEqual(round(data["top1_agree"], 4), top1, name)
+
     def test_aggregation_from_raw_results(self):
         directory = ROOT / "results/20260919"
         actual = summarize(directory)
@@ -97,6 +141,27 @@ class EvidenceTests(unittest.TestCase):
             actual["bootstrap_interval_percent"], expected["bootstrap_interval_percent"]
         )
         self.assertEqual(actual["cells"], expected["cells"])
+
+
+class StepRateTests(unittest.TestCase):
+    def test_median_of_single_request_lines(self):
+        def line(time, running, accept, throughput):
+            return (
+                f"[2026-10-10 {time}] Decode batch, #running-req: {running}, #full token: 4096, "
+                f"accept len: {accept}, gen throughput (token/s): {throughput}"
+            )
+
+        lines = [
+            line("20:00:01", 1, "2.00", "200.00"),
+            line("20:00:02", 1, "2.50", "275.00"),
+            line("20:00:03", 1, "2.40", "264.00"),
+            line("20:00:04", 2, "2.00", "400.00"),  # two requests: not a single-request step
+            line("20:00:05", 1, "1.00", "40.00"),  # warm-up / idle tail
+            line("20:00:09", 1, "2.00", "300.00"),  # outside the window
+            "unrelated log line",
+        ]
+        rates = step_median.step_rates(lines, "20:00:00", "20:00:08")
+        self.assertEqual(sorted(rates), [100.0, 110.0, 110.0])
 
 
 class StreamingTests(unittest.TestCase):

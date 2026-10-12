@@ -4,7 +4,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export DOCKER_HOST="${DOCKER_HOST:-unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock}"
-IMAGE="${IMAGE:-local/qwen-flash-next:0.5.21-20261009-a16}"
+IMAGE="${IMAGE:-local/qwen-flash-next:0.5.21-20261010-kern}"
 HF_CACHE="${HF_CACHE:-$HOME/models/huggingface}"
 mkdir -p "$HF_CACHE"
 docker run --rm --security-opt no-new-privileges:true \

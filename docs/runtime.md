@@ -1,4 +1,4 @@
-# Runtime notes — 2026-09-19, decode kernels 2026-09-24, RedHatAI and decode work 2026-10-05, W4A16 2026-10-09
+# Runtime notes — 2026-09-19, decode kernels 2026-09-24, RedHatAI and decode work 2026-10-05, W4A16 2026-10-09, decode kernels 2026-10-10
 
 ## Reproducible image
 
@@ -151,6 +151,50 @@ Draft side:
 
 Turn off one feature by removing its variable from `serve/run-server.sh`. `QWENFAST=0` turns off all qwenfast
 replacements.
+
+## October 10 changes
+
+Decode-only kernels for batches of 1-8 rows. Prefill, weights, formats and sampling are unchanged. The
+[October 10 report](../results/20261010/REPORT.md) has the measurements.
+
+- `QWENFAST_A16MOE=1` (`qf_a16moe.cu`, needs `QWEN_NVFP4_MARLIN=1` and `QWENFAST_ROUTER=1`): one persistent
+  kernel runs the routed experts on the Marlin-packed NVFP4 weights, with Marlin's dequantization, BF16 activations
+  and FP32 accumulation. It covers gate/up, SiLU-mul, down, the top-k weighting, the sum over the 10 experts and the sigmoid-gated shared
+  expert. It is shape-gated: it declines (and logs `a16 MoE decode declined`) unless the experts carry the Marlin
+  layout and the router selects 10 experts. Without `QWEN_NVFP4_MARLIN=1` it never runs, and without
+  `QWENFAST_ROUTER=1` it is not reached.
+- `QWENFAST_A16SHARED` (default `1` when `QWENFAST_A16MOE=1`): the shared expert's group-scaled INT8 weights are
+  computed inside the persistent kernel instead of on a side stream. `QWENFAST_A16SHARED=0` keeps the side-stream
+  shared expert and passes its output to the kernel. The in-kernel path needs `shared` in `QWENFAST_W8`; otherwise
+  the side stream is used.
+- `QWENFAST_W8M=1` (`qf_w8g.cu`): the group-scaled INT8 dense GEMMs (K = 2,560 and 6,144) run on tensor cores
+  (`mma.m16n8k16`), with the same weights and scales as w8g.
+- `QWENFAST_W8M_PDL=1`: w8m is launched with programmatic dependent launch, so its first weight requests overlap
+  the preceding hyper-connection mix. It only affects w8m.
+- `QWENFAST_HCCOMB=1` (`qf_hc8.cu` `hc_combine_mix_w8`, needs `hc` in `QWENFAST_W8`): each hyper-connection combine
+  runs inside the next mix kernel, within a layer and across layers except around the PLE layer. It is used for up
+  to 4 rows (`QWENFAST_HCCOMB_MAXROWS`) and is bit-identical to combine followed by mix.
+- Router (`qf_router.cu`, part of `QWENFAST_ROUTER=1`): token staging is sized to the batch and the top-k uses
+  `redux.sync`. This change has no switch; its outputs are bit-identical to the October 9 router.
+
+The server log lists the active paths at startup: `a16 MoE decode active`, `a16 shared expert in-kernel` and
+`hc combine->mix fusion installed`.
+
+To turn the October 10 kernels off, remove `QWENFAST_A16MOE=1`, `QWENFAST_W8M=1`, `QWENFAST_W8M_PDL=1` and
+`QWENFAST_HCCOMB=1` from `serve/run-server.sh`. Decode then runs the October 9 kernels; only the router change
+remains, with identical outputs. Each variable can also be removed on its own.
+
+Kernel tests for these paths (GPU, inside the image):
+- `test_a16moe.py`: compares the persistent kernel with SGLang's Marlin MoE path on 12 layers. It reads the target
+  view at `/models/target`. Mount `$MODEL_VIEWS/<revision>/target` there, and `$HF_CACHE` at its own host path,
+  where the view's symlinks point. It builds the kernel with `qfa16_bind.cpp`.
+- `test_w8m.py`: compares w8m with w8g and an FP32 reference.
+- `test_hc8c.py`: checks that the fused combine-mix is bit-identical to combine followed by mix.
+- `test_router3.py`: compares the router and HC mix outputs of two libraries in separate processes.
+
+`test_w8m.py`, `test_hc8c.py` and `test_router3.py` import `build_qf` from `/ext`, so mount `serve/qwenfast` there.
+`test_hc8c.py` and `test_router3.py` also load the previous build's library from `/prod/qwenfast.so`.
+`test_router3.py` runs twice: `prod` first, which writes `/ext/rt3-prod.pt`, then `new`.
 
 ## Token-map provenance
 

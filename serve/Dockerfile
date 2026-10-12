@@ -22,5 +22,5 @@ RUN python3 /opt/flash-next/verify-runtime.py --installed
 
 ARG RUNTIME_MANIFEST_SHA256
 LABEL org.opencontainers.image.source="https://github.com/SSHdotCodes/qwen-3.8-flash-next-pro6000" \
-      local.flash-next.release="0.5.21-pro6000-20261009-a16" \
+      local.flash-next.release="0.5.21-pro6000-20261010-kern" \
       local.flash-next.manifest-sha256="${RUNTIME_MANIFEST_SHA256}"

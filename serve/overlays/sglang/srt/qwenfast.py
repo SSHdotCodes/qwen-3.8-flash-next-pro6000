@@ -35,6 +35,10 @@ ROUTER_ENABLED = ENABLED and os.environ.get("QWENFAST_ROUTER", "0") == "1"
 GDN_ENABLED = ENABLED and os.environ.get("QWENFAST_GDN", "1") == "1"
 GDN_MAXT = int(os.environ.get("QWENFAST_GDN_MAXT", "4"))
 SAMPLE_ENABLED = ENABLED and os.environ.get("QWENFAST_SAMPLE", "1") == "1"
+A16MOE_ENABLED = ENABLED and os.environ.get("QWENFAST_A16MOE", "0") == "1"
+# Decode: a block's hyper-connection combine runs inside the next mix kernel (hc_combine_mix_w8), within a layer
+# (attention combine -> MLP mix) and across layers (MLP combine -> next attention mix, when no PLE sits between)
+HCCOMB_ENABLED = ENABLED and os.environ.get("QWENFAST_HCCOMB", "0") == "1"
 QSAMETA_ENABLED = ENABLED and os.environ.get("QWENFAST_QSAMETA", "1") == "1"
 # Exact 12-bit packing of selected BF16 target weights (bit-identical weights, 75% of the bytes): GDN in_proj,
 # attention qkv + o_proj and the target lm_head. Decode/verify rows (<= 8) use pk_gemm; larger calls unpack to BF16.
@@ -562,6 +566,8 @@ def _install_pk():
                 fq_model(model)
             if W8_CATS:
                 w8_model(model)
+            if HCCOMB_ENABLED and HC_ENABLED and "hc" in W8_CATS:
+                _install_hc_comb(model)
             if PK_ENABLED:
                 pk_model(model)
 
@@ -894,6 +900,87 @@ def _install_hc():
     logger.info("qwenfast: decode hyper-connection override installed")
 
 
+class _HCDeferred:
+    """Residual slot of a layer whose MLP combine was left for the next layer's attention mix to run."""
+    __slots__ = ("mod", "res")
+
+    def __init__(self, mod, res):
+        self.mod, self.res = mod, res
+
+
+def _hc_comb_ok(mix_mod, block_output, residuals):
+    if not isinstance(residuals, tuple) or len(residuals) != 2:
+        return False
+    hyper_input, second = residuals
+    return (
+        isinstance(second, torch.Tensor) and second.dtype == torch.float32 and second.is_contiguous()
+        and getattr(mix_mod, "_qf_w8hc", None) is not None
+        and isinstance(block_output, torch.Tensor) and block_output.dtype == torch.bfloat16 and block_output.dim() == 2
+        and block_output.shape[0] <= int(os.environ.get("QWENFAST_HCCOMB_MAXROWS", "4"))
+        and block_output.shape[1] == 2560 and block_output.is_contiguous()
+        and hyper_input.dim() == 2 and block_output.shape[0] == hyper_input.shape[0]
+        and tuple(second.shape) == (hyper_input.shape[0], 4)
+        and _hc_mix_ok(mix_mod, hyper_input)
+    )
+
+
+def _hc_comb_mix(mix_mod, block_output, residuals):
+    """combine(block_output, residuals) then mix_mod.mix(...) in one kernel; same results as the two steps."""
+    hyper_input, second = residuals
+    winj = mix_mod.block_inject_weight.weight if hasattr(mix_mod, "block_inject_weight") else None
+    normed, partial, bar = _hc_bufs(block_output.device)
+    w8 = mix_mod._qf_w8hc
+    out, inj, xo = ext().hc_combine_mix_w8(
+        block_output, hyper_input, second, mix_mod.hc_norm.weight, w8[0], w8[1], winj, w8[2], w8[3],
+        mix_mod.hc_norm.variance_epsilon, normed, partial, bar, True)
+    return out, (xo, inj)
+
+
+def _install_hc_comb(model):
+    """After the target loads (qwen4_exp is only importable then): link each decoder layer to the next one whose
+    attention mix can absorb its MLP combine, and route the layer prepare/postprocess steps through the fused kernel."""
+    from sglang.srt.models import qwen4_exp as q4
+    mixin = q4.Qwen4ExpLayerExtensionMixin
+    layers = [m for m in model.modules() if isinstance(m, mixin)]
+    linked = 0
+    for a, b in zip(layers, layers[1:]):
+        if getattr(b, "layer_id", None) == getattr(a, "layer_id", -2) + 1 and b.ple is None:
+            a._qf_hc_next = b
+            linked += 1
+    if getattr(mixin, "_qf_hc_comb", False):
+        logger.info("qwenfast: hc combine->mix re-linked %d of %d layers", linked, len(layers))
+        return
+    mixin._qf_hc_comb = True
+    orig_prep_attn = mixin._prepare_qwen4_exp_attn
+    orig_prep_mlp = mixin._prepare_qwen4_exp_mlp
+    orig_post = mixin._postprocess_qwen4_exp_layer
+
+    def prep_attn(self, hidden_states, residual, forward_batch, *, ple_batch):
+        if isinstance(residual, _HCDeferred):
+            if self.ple is None and _hc_comb_ok(self.attn_hyper_connection, hidden_states, residual.res):
+                return _hc_comb_mix(self.attn_hyper_connection, hidden_states, residual.res)
+            hidden_states = residual.mod.combine(hidden_states, residual.res)
+            residual = None
+        return orig_prep_attn(self, hidden_states, residual, forward_batch, ple_batch=ple_batch)
+
+    def prep_mlp(self, hidden_states, residual, forward_batch):
+        if q4.get_parallel().attn_tp_size == 1 and _hc_comb_ok(self.mlp_hyper_connection, hidden_states, residual):
+            return _hc_comb_mix(self.mlp_hyper_connection, hidden_states, residual)
+        return orig_prep_mlp(self, hidden_states, residual, forward_batch)
+
+    def post(self, hidden_states, residual, forward_batch):
+        nxt = getattr(self, "_qf_hc_next", None)
+        if (nxt is not None and not getattr(self, "_is_layer_to_capture", False)
+                and _hc_comb_ok(nxt.attn_hyper_connection, hidden_states, residual)):
+            return hidden_states, _HCDeferred(self.mlp_hyper_connection, residual)
+        return orig_post(self, hidden_states, residual, forward_batch)
+
+    mixin._prepare_qwen4_exp_attn = prep_attn
+    mixin._prepare_qwen4_exp_mlp = prep_mlp
+    mixin._postprocess_qwen4_exp_layer = post
+    logger.info("qwenfast: hc combine->mix fusion installed (%d of %d layers hand their MLP combine on)", linked, len(layers))
+
+
 _router_scratch = {}
 
 
@@ -904,6 +991,74 @@ def _router_bufs(device):
         b = (torch.empty(8 * 512, dtype=torch.float32, device=device), torch.zeros(1, dtype=torch.int32, device=device))
         _router_scratch[key] = b
     return b
+
+
+_a16_scratch = {}
+
+
+def _a16_bufs(device):
+    key = (device, torch.cuda.current_stream(device).cuda_stream)
+    b = _a16_scratch.get(key)
+    if b is None:
+        b = dict(
+            hbuf=torch.empty(80 * 8 * 640, dtype=torch.bfloat16, device=device),
+            ybuf=torch.empty(8 * 10 * 2560, dtype=torch.bfloat16, device=device),
+            gl=torch.empty(8, dtype=torch.float32, device=device),
+            ctrl=torch.zeros(1024, dtype=torch.int32, device=device),
+            pbuf=torch.empty(80 * 10 * 2 * 1024, dtype=torch.float32, device=device),
+            dbg=torch.empty(0, dtype=torch.int64, device=device),
+            shbuf=torch.empty(8 * (640 + 2560), dtype=torch.bfloat16, device=device),
+            none=torch.empty(0, dtype=torch.bfloat16, device=device),
+        )
+        _a16_scratch[key] = b
+    return b
+
+
+def _a16_ok(block, x):
+    """Decode routed experts on the Marlin-packed NVFP4 weights (QWEN_NVFP4_MARLIN loader) + shared-expert gate."""
+    ex = block.experts
+    w13 = getattr(ex, "w13_weight", None)
+    s13 = getattr(ex, "w13_weight_scale", None)
+    w2 = getattr(ex, "w2_weight", None)
+    s2 = getattr(ex, "w2_weight_scale", None)
+    g13 = getattr(ex, "w13_weight_scale_2", None)
+    g2 = getattr(ex, "w2_weight_scale_2", None)
+    sg = getattr(block, "shared_expert_gate", None)
+    return (
+        x.dim() == 2 and 1 <= x.shape[0] <= 8 and x.shape[1] == 2560 and x.dtype == torch.bfloat16 and x.is_contiguous()
+        and w13 is not None and w13.dtype == torch.int32 and tuple(w13.shape) == (512, 160, 2560)
+        and w2 is not None and w2.dtype == torch.int32 and tuple(w2.shape) == (512, 40, 5120)
+        and s13 is not None and s13.dtype == torch.float8_e4m3fn and tuple(s13.shape) == (512, 160, 1280)
+        and s2 is not None and s2.dtype == torch.float8_e4m3fn and tuple(s2.shape) == (512, 40, 2560)
+        and g13 is not None and g13.dtype == torch.bfloat16 and g13.numel() == 512
+        and g2 is not None and g2.dtype == torch.bfloat16 and g2.numel() == 512
+        and sg is not None and getattr(sg, "weight", None) is not None and sg.weight.numel() == 2560
+        and sg.weight.dtype == torch.bfloat16 and getattr(sg, "bias", None) is None
+    )
+
+
+def _a16_shared(block):
+    """w8g INT8 weights of the shared expert (gate_up [1280, 2560], down [2560, 640]) when the persistent a16 kernel
+    can compute it in-kernel (same arithmetic as w8g_gemm + SiluAndMul), else None (side-stream shared expert)."""
+    hit = getattr(block, "_qf_a16sh", 0)
+    if hit != 0:
+        return hit
+    hit = None
+    se = getattr(block, "shared_expert", None)
+    act = type(getattr(se, "act_fn", None)).__name__
+    if os.environ.get("QWENFAST_A16SHARED", "1") == "1" and se is not None:
+        gu = pk_lookup(getattr(getattr(se, "gate_up_proj", None), "weight", None))
+        dn = pk_lookup(getattr(getattr(se, "down_proj", None), "weight", None))
+        if (gu is not None and dn is not None and act == "SiluAndMul"
+                and gu[0].get("kind") == "w8" and dn[0].get("kind") == "w8"
+                and gu[0]["shape"] == (1280, 2560) and dn[0]["shape"] == (2560, 640)
+                and gu[1:] == (0, 1280) and dn[1:] == (0, 2560)
+                and getattr(se.gate_up_proj, "bias", None) is None and getattr(se.down_proj, "bias", None) is None):
+            hit = (gu[0]["q"], gu[0]["s"], dn[0]["q"], dn[0]["s"])
+    block._qf_a16sh = hit
+    logger.info("qwenfast: a16 shared expert %s (layer %s)", "in-kernel" if hit else "side stream (%s)" % act if se is not None else "none",
+                getattr(block, "layer_id", "?"))
+    return hit
 
 
 def _install_router():
@@ -958,10 +1113,16 @@ def _install_router():
             logger.info("qwenfast: router fast path active (experts quant method %s)", type(getattr(self.experts, "quant_method", None)).__name__)
         # Shared expert forks first (it needs SM slots before the routed experts' CTAs fill the GPU); the
         # router follows the mix directly on the main stream so it can prefetch its weight under PDL.
+        use_a16 = A16MOE_ENABLED and self.topk.topk_config.top_k == 10 and _a16_ok(self, hidden_states)
+        if A16MOE_ENABLED and ("a16" if use_a16 else "a16off") not in logged:
+            logged.add("a16" if use_a16 else "a16off")
+            logger.info("qwenfast: a16 MoE decode %s (layer %s)", "active" if use_a16 else "declined", getattr(self, "layer_id", "?"))
         cur = torch.cuda.current_stream()
-        self.alt_stream.wait_stream(cur)
-        with torch.cuda.stream(self.alt_stream):
-            shared_output = self._forward_shared_experts(hidden_states.clone(), apply_gate=not use_fused_gate)
+        sh8 = _a16_shared(self) if use_a16 else None
+        if sh8 is None:
+            self.alt_stream.wait_stream(cur)
+            with torch.cuda.stream(self.alt_stream):
+                shared_output = self._forward_shared_experts(hidden_states.clone(), apply_gate=not use_fused_gate and not use_a16)
         cfg = self.topk.topk_config
         scratch, counter = _router_bufs(hidden_states.device)
         topk_w, topk_ids, logits = ext().router_topk(
@@ -970,6 +1131,24 @@ def _install_router():
             topk_ids=topk_ids, topk_weights=topk_w, topk_config=cfg, router_logits=logits,
             layer_id=self.topk.layer_id, num_token_non_padded=None, expert_location_dispatch_info=None)
         get_global_expert_distribution_recorder().on_select_experts(topk_ids=rec_ids)
+        if use_a16:
+            # routed experts + sigmoid(x . w_gate) * shared in one persistent kernel; the shared expert (side
+            # stream) must be complete before it starts, and the caller then skips its gate-add (shared None).
+            ex = self.experts
+            b = _a16_bufs(hidden_states.device)
+            if sh8 is None:
+                cur.wait_stream(self.alt_stream)
+                shared_arg, sh8 = shared_output.contiguous(), (b["none"],) * 4
+            else:
+                shared_arg = b["none"]
+            out = torch.empty_like(hidden_states)
+            ext().a16_moe_decode(
+                hidden_states, topk_ids.to(torch.int32).contiguous(), topk_w.to(torch.float32).contiguous(),
+                ex.w13_weight, ex.w13_weight_scale, ex.w13_weight_scale_2.view(-1),
+                ex.w2_weight, ex.w2_weight_scale, ex.w2_weight_scale_2.view(-1),
+                self.shared_expert_gate.weight.view(-1), shared_arg,
+                b["hbuf"], b["ybuf"], b["gl"], b["ctrl"], out, 4, b["dbg"], b["pbuf"], *sh8, b["shbuf"])
+            return out, None
         topk_output = tk.StandardTopKOutput(topk_w, topk_ids, logits)
         router_output = self.experts(hidden_states, topk_output)
         cur.wait_stream(self.alt_stream)

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Validated recommended-sampling profile: full 262K context, two slots, RedHatAI NVFP4 routed
-# experts run as W4A16 (Marlin), BF16 dense weights stored exactly or as group-scaled INT8,
-# FP8 E4M3 KV, exact rejection sampling, draft-only hot map.
+# experts run as W4A16 (Marlin for prefill, a persistent decode kernel for 1-8 tokens), BF16 dense
+# weights stored exactly or as group-scaled INT8, FP8 E4M3 KV, exact rejection sampling,
+# draft-only hot map.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export DOCKER_HOST="${DOCKER_HOST:-unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock}"
-IMAGE="${IMAGE:-local/qwen-flash-next:0.5.21-20261009-a16}"
+IMAGE="${IMAGE:-local/qwen-flash-next:0.5.21-20261010-kern}"
 NAME="${NAME:-qwen38-flash-next-sglang}"
 PORT="${PORT:-30010}"
 HF_CACHE="${HF_CACHE:-$HOME/models/huggingface}"
@@ -27,6 +28,7 @@ command=(docker run --rm --pull never --name "$NAME"
   -e QWEN_MTP_HOT_INT8=1 -e QWEN_MTP_FC_INT8=1 -e QWEN_MTP_HOT_SCREEN=1 -e QWEN_DRAFT_TRUNC=1
   -e QWENFAST_ROUTER=1 -e QWENFAST_PK=1 -e QWENFAST_W8=inproj,qkv,oproj,head,shared,outproj,hc
   -e QWEN_NVFP4_MARLIN=1
+  -e QWENFAST_A16MOE=1 -e QWENFAST_W8M=1 -e QWENFAST_W8M_PDL=1 -e QWENFAST_HCCOMB=1
   -v "$HF_CACHE:/root/.cache/huggingface"
   -v "$HF_CACHE:$HF_CACHE:ro"
   -v "$VIEW:/opt/redhat-model:ro"

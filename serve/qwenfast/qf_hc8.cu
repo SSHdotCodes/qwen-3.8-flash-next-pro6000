@@ -4,6 +4,10 @@
 //   Wu [10240, 320] int8 + bf16 scales [10240, 5] (groups of 64).
 // Each weight is expanded to bf16(q * s), the exact dequantized value, right before the tensor-core MMA, so the
 // result equals hc_mix_fused run on those dequantized BF16 weights. Half the weight bytes of the BF16 kernel.
+//
+// hc_combine_mix_w8: the previous block's combine (hc_combine_apply) fused in front: x = bf16(r + a * y) with
+// a = 2 / (1 + exp(-inj_prev / hc)) is formed while normalizing and written out (the new hyper_input), so the
+// mix chains (PDL) straight after the block's last kernel and its weight loads overlap that kernel's tail.
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -64,18 +68,23 @@ constexpr int XS_STRIDE = HS + 32;        // bf16 elements per token row in shar
 constexpr int WU8_STRIDE = WU8_VEC + 1;   // uint4 per int8 Wu row in shared memory (336 B)
 constexpr int TS_STRIDE = R + 32;         // bf16 elements per token row of t
 
+// rows of x kept in shared memory (MMA rows >= M read zeros from registers); t reuses the region with 8 rows
 template <int M>
+constexpr int xs_elems() { return (M * XS_STRIDE > 8 * TS_STRIDE) ? M * XS_STRIDE : 8 * TS_STRIDE; }
+
+template <int M, bool COMB>
 __global__ void __launch_bounds__(THREADS, 1) hc_mix_fused_w8_kernel(
         const __nv_bfloat16 * __restrict__ x, const __nv_bfloat16 * __restrict__ w_norm,
         const int8_t * __restrict__ wd, const uint16_t * __restrict__ wd_s, const __nv_bfloat16 * __restrict__ winj,
         const int8_t * __restrict__ wu, const uint16_t * __restrict__ wu_s,
         __nv_bfloat16 * __restrict__ out, float * __restrict__ inj_out,
         __nv_bfloat16 * __restrict__ normed, float * __restrict__ partial, unsigned * __restrict__ bar,
-        int rows, float eps) {
+        int rows, float eps, const __nv_bfloat16 * __restrict__ yb, const float * __restrict__ inj_prev,
+        __nv_bfloat16 * __restrict__ xout) {
     extern __shared__ __align__(16) uint4 smem[];
     uint4 * wus = smem;                                                               // [MAXJ*4][WU8_STRIDE]
     uint16_t * wuss = reinterpret_cast<uint16_t *>(smem + MAXJ * HC * WU8_STRIDE);  // [MAXJ*4][WU_NG] (+pad)
-    __nv_bfloat16 * xs = reinterpret_cast<__nv_bfloat16 *>(smem + MAXJ * HC * WU8_STRIDE + 48);   // [8][XS_STRIDE]
+    __nv_bfloat16 * xs = reinterpret_cast<__nv_bfloat16 *>(smem + MAXJ * HC * WU8_STRIDE + 48);   // [M][XS_STRIDE]
     __shared__ float s_red[WARPS][M];
     __shared__ float s_rstd[M];
     __shared__ float s_c[WARPS][16][8];
@@ -136,6 +145,38 @@ __global__ void __launch_bounds__(THREADS, 1) hc_mix_fused_w8_kernel(
             xv[m][0] = m < rows ? __ldcg(src + tid) : make_uint4(0, 0, 0, 0);
             xv[m][1] = (m < rows && tid < KQ_VEC - THREADS) ? __ldcg(src + tid + THREADS) : make_uint4(0, 0, 0, 0);
         }
+        if constexpr (COMB) {
+            // x = bf16(r + a * y), exactly hc_combine_apply; all loads issued before any use. This CTA's share of
+            // the row is written out as the new hyper_input.
+            uint4 yv[M][2];
+            float ip[M];
+#pragma unroll
+            for (int m = 0; m < M; ++m) {
+                const uint4 * ysrc = reinterpret_cast<const uint4 *>(yb + (size_t) m * HS);
+                ip[m] = m < rows ? __ldcg(inj_prev + m * NINJ + q) : 0.f;
+                yv[m][0] = m < rows ? __ldcg(ysrc + tid) : make_uint4(0, 0, 0, 0);
+                yv[m][1] = (m < rows && tid < KQ_VEC - THREADS) ? __ldcg(ysrc + tid + THREADS) : make_uint4(0, 0, 0, 0);
+            }
+#pragma unroll
+            for (int m = 0; m < M; ++m) {
+                const float a = 2.0f / (1.0f + expf(-ip[m] / HC));
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    const int k = tid + h * THREADS;
+                    float rf[8], yf[8];
+                    bf16x8_to_f32(xv[m][h], rf);
+                    bf16x8_to_f32(yv[m][h], yf);
+                    uint4 o;
+                    __nv_bfloat162 * op = reinterpret_cast<__nv_bfloat162 *>(&o);
+#pragma unroll
+                    for (int e = 0; e < 4; ++e)
+                        op[e] = __floats2bfloat162_rn(rf[2 * e] + a * yf[2 * e], rf[2 * e + 1] + a * yf[2 * e + 1]);
+                    xv[m][h] = o;
+                    if (m < rows && k < KQ_VEC && k % per_q == qi)
+                        reinterpret_cast<uint4 *>(xout + (size_t) m * K + q * HS)[k] = o;
+                }
+            }
+        }
 #pragma unroll
         for (int m = 0; m < M; ++m) {
             float s = 0.f;
@@ -154,8 +195,6 @@ __global__ void __launch_bounds__(THREADS, 1) hc_mix_fused_w8_kernel(
 #pragma unroll
             for (int m = 0; m < M; ++m) s_red[warp][m] = ss[m];
         }
-        for (int c = tid; c < (8 - M) * KQ_VEC; c += THREADS)
-            reinterpret_cast<uint4 *>(xs + (M + c / KQ_VEC) * XS_STRIDE)[c % KQ_VEC] = make_uint4(0, 0, 0, 0);
         __syncthreads();
         if (tid < M) {
             float s = 0.f;
@@ -194,10 +233,11 @@ __global__ void __launch_bounds__(THREADS, 1) hc_mix_fused_w8_kernel(
             for (int kc = 0; kc < 10; ++kc) wa[kc] = i8x8_to_bf16(wa[kc].x, wa[kc].y, bf16_bits(wa[kc].z));
         }
         float d[4] = {0.f, 0.f, 0.f, 0.f};
-        const __nv_bfloat16 * xb = xs + grp * XS_STRIDE + warp * 320 + tq * 8;
+        const bool brow = grp < M;
+        const __nv_bfloat16 * xb = xs + (brow ? grp : 0) * XS_STRIDE + warp * 320 + tq * 8;
 #pragma unroll
         for (int kc = 0; kc < 10; ++kc) {
-            const uint4 bv = *reinterpret_cast<const uint4 *>(xb + kc * 32);
+            const uint4 bv = brow ? *reinterpret_cast<const uint4 *>(xb + kc * 32) : make_uint4(0, 0, 0, 0);
             mma16816(d, wa[kc].x, 0u, wa[kc].y, 0u, bv.x, bv.y);
             mma16816(d, wa[kc].z, 0u, wa[kc].w, 0u, bv.z, bv.w);
         }
@@ -225,6 +265,20 @@ __global__ void __launch_bounds__(THREADS, 1) hc_mix_fused_w8_kernel(
     __syncthreads();
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
 
+    // the up projection's gate multiplies normed[m, g*HS + j] (written before the barrier by other CTAs): load this
+    // thread's four values now, alongside the partial sums, instead of after the MMA
+    float nv[2][2] = {{0.f, 0.f}, {0.f, 0.f}};
+    if (warp < 4 && warp * 4 < nj) {
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int rr = warp * 16 + grp + 8 * h, jl = rr >> 2, g = rr & 3;
+#pragma unroll
+            for (int c = 0; c < 2; ++c) {
+                const int m = 2 * tq + c;
+                if (rr < nj * HC && m < rows) nv[h][c] = __bfloat162float(__ldcg(normed + (size_t) m * K + g * HS + j0 + jl));
+            }
+        }
+    }
     __nv_bfloat16 * ts = xs;
     {
         constexpr int TV = (8 * R + THREADS - 1) / THREADS;
@@ -290,7 +344,7 @@ __global__ void __launch_bounds__(THREADS, 1) hc_mix_fused_w8_kernel(
                 float v = 0.f;
                 if (valid && m < rows) {
                     const float gate = 1.f / (1.f + __expf(-d[2 * h + c]));
-                    v = gate * __bfloat162float(__ldcg(normed + (size_t) m * K + g * HS + j));
+                    v = gate * nv[h][c];
                 }
                 v += __shfl_xor_sync(0xffffffff, v, 4);
                 v += __shfl_xor_sync(0xffffffff, v, 8);
@@ -316,13 +370,13 @@ __global__ void __launch_bounds__(THREADS, 1) hc_mix_fused_w8_kernel(
     }
 }
 
-template <int M>
+template <int M, bool COMB>
 void launch_mix8(const at::Tensor & x, const at::Tensor & w_norm, const at::Tensor & wd, const at::Tensor & wd_s,
                  const at::Tensor * winj, const at::Tensor & wu, const at::Tensor & wu_s, at::Tensor & out, at::Tensor & inj,
                  at::Tensor & normed, at::Tensor & partial, at::Tensor & bar, int rows, float eps, int grid,
-                 cudaStream_t s, bool pdl) {
-    const int smem = (MAXJ * HC * WU8_STRIDE + 48) * 16 + 8 * XS_STRIDE * 2;
-    auto k = hc_mix_fused_w8_kernel<M>;
+                 cudaStream_t s, bool pdl, const at::Tensor * y, const at::Tensor * inj_prev, at::Tensor * xout) {
+    const int smem = (MAXJ * HC * WU8_STRIDE + 48) * 16 + xs_elems<M>() * 2;
+    auto k = hc_mix_fused_w8_kernel<M, COMB>;
     static bool attr = false;
     if (!attr) {
         cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
@@ -344,16 +398,26 @@ void launch_mix8(const at::Tensor & x, const at::Tensor & w_norm, const at::Tens
                                       (const int8_t *) wu.data_ptr(), (const uint16_t *) wu_s.data_ptr(),
                                       (__nv_bfloat16 *) out.data_ptr(),
                                       winj ? inj.data_ptr<float>() : (float *) nullptr, (__nv_bfloat16 *) normed.data_ptr(),
-                                      partial.data_ptr<float>(), reinterpret_cast<unsigned *>(bar.data_ptr<int>()), rows, eps));
+                                      partial.data_ptr<float>(), reinterpret_cast<unsigned *>(bar.data_ptr<int>()), rows, eps,
+                                      y ? (const __nv_bfloat16 *) y->data_ptr() : (const __nv_bfloat16 *) nullptr,
+                                      inj_prev ? inj_prev->data_ptr<float>() : (float *) nullptr,
+                                      xout ? (__nv_bfloat16 *) xout->data_ptr() : (__nv_bfloat16 *) nullptr));
 }
 
-}  // namespace
+template <bool COMB>
+void dispatch_mix8(const at::Tensor & x, const at::Tensor & w_norm, const at::Tensor & wd, const at::Tensor & wd_s,
+                   const at::Tensor * wi, const at::Tensor & wu, const at::Tensor & wu_s, at::Tensor & out, at::Tensor & inj,
+                   at::Tensor & normed, at::Tensor & partial, at::Tensor & bar, int rows, float e, int grid,
+                   cudaStream_t s, bool pdl, const at::Tensor * y, const at::Tensor * ip, at::Tensor * xo) {
+    if (rows == 1) launch_mix8<1, COMB>(x, w_norm, wd, wd_s, wi, wu, wu_s, out, inj, normed, partial, bar, rows, e, grid, s, pdl, y, ip, xo);
+    else if (rows == 2) launch_mix8<2, COMB>(x, w_norm, wd, wd_s, wi, wu, wu_s, out, inj, normed, partial, bar, rows, e, grid, s, pdl, y, ip, xo);
+    else if (rows <= 4) launch_mix8<4, COMB>(x, w_norm, wd, wd_s, wi, wu, wu_s, out, inj, normed, partial, bar, rows, e, grid, s, pdl, y, ip, xo);
+    else launch_mix8<8, COMB>(x, w_norm, wd, wd_s, wi, wu, wu_s, out, inj, normed, partial, bar, rows, e, grid, s, pdl, y, ip, xo);
+}
 
-// As hc_mix_fused, with wd int8 [320, 10240] + wd_s bf16 [320, 80], wu int8 [10240, 320] + wu_s bf16 [10240, 5].
-std::vector<at::Tensor> hc_mix_fused_w8(const at::Tensor & x, const at::Tensor & w_norm, const at::Tensor & wd,
-                                        const at::Tensor & wd_s, const c10::optional<at::Tensor> & winj,
-                                        const at::Tensor & wu, const at::Tensor & wu_s, double eps,
-                                        at::Tensor & normed, at::Tensor & partial, at::Tensor & bar, bool pdl) {
+void check_mix8(const at::Tensor & x, const at::Tensor & w_norm, const at::Tensor & wd, const at::Tensor & wd_s,
+                const c10::optional<at::Tensor> & winj, const at::Tensor & wu, const at::Tensor & wu_s,
+                const at::Tensor & normed, const at::Tensor & partial, const at::Tensor & bar) {
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.dim() == 2 && x.size(1) == K && x.is_contiguous());
     TORCH_CHECK(w_norm.scalar_type() == at::kBFloat16 && w_norm.numel() == K && w_norm.is_contiguous());
     TORCH_CHECK(wd.scalar_type() == at::kChar && wd.size(0) == R && wd.size(1) == K && wd.is_contiguous());
@@ -365,20 +429,48 @@ std::vector<at::Tensor> hc_mix_fused_w8(const at::Tensor & x, const at::Tensor &
     TORCH_CHECK(normed.scalar_type() == at::kBFloat16 && normed.numel() >= MAXM * K);
     TORCH_CHECK(partial.scalar_type() == at::kFloat && partial.numel() >= HC * MAXM * NROWS);
     TORCH_CHECK(bar.scalar_type() == at::kInt && bar.numel() >= 2);
+    TORCH_CHECK(x.size(0) >= 1 && x.size(0) <= MAXM);
+}
+
+}  // namespace
+
+// As hc_mix_fused, with wd int8 [320, 10240] + wd_s bf16 [320, 80], wu int8 [10240, 320] + wu_s bf16 [10240, 5].
+std::vector<at::Tensor> hc_mix_fused_w8(const at::Tensor & x, const at::Tensor & w_norm, const at::Tensor & wd,
+                                        const at::Tensor & wd_s, const c10::optional<at::Tensor> & winj,
+                                        const at::Tensor & wu, const at::Tensor & wu_s, double eps,
+                                        at::Tensor & normed, at::Tensor & partial, at::Tensor & bar, bool pdl) {
+    check_mix8(x, w_norm, wd, wd_s, winj, wu, wu_s, normed, partial, bar);
     const int rows = x.size(0);
-    TORCH_CHECK(rows >= 1 && rows <= MAXM);
     const c10::cuda::CUDAGuard guard(x.device());
     auto out = at::empty({rows, HS}, x.options());
     auto inj = at::empty({rows, NINJ}, x.options().dtype(at::kFloat));
     const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
     const int grid = (sms / HC) * HC;
     TORCH_CHECK(grid * MAXJ >= HS && (grid / HC) * 7 >= NROWS, "too few SMs for hc_mix_fused_w8");
-    cudaStream_t s = at::cuda::getCurrentCUDAStream();
-    const at::Tensor * wi = winj.has_value() ? &winj.value() : nullptr;
-    const float e = (float) eps;
-    if (rows == 1) launch_mix8<1>(x, w_norm, wd, wd_s, wi, wu, wu_s, out, inj, normed, partial, bar, rows, e, grid, s, pdl);
-    else if (rows == 2) launch_mix8<2>(x, w_norm, wd, wd_s, wi, wu, wu_s, out, inj, normed, partial, bar, rows, e, grid, s, pdl);
-    else if (rows <= 4) launch_mix8<4>(x, w_norm, wd, wd_s, wi, wu, wu_s, out, inj, normed, partial, bar, rows, e, grid, s, pdl);
-    else launch_mix8<8>(x, w_norm, wd, wd_s, wi, wu, wu_s, out, inj, normed, partial, bar, rows, e, grid, s, pdl);
+    dispatch_mix8<false>(x, w_norm, wd, wd_s, winj.has_value() ? &winj.value() : nullptr, wu, wu_s, out, inj, normed,
+                         partial, bar, rows, (float) eps, grid, at::cuda::getCurrentCUDAStream(), pdl, nullptr, nullptr, nullptr);
     return {out, inj};
+}
+
+// hc_combine_apply(y, r, inj_prev) followed by hc_mix_fused_w8 on its result, in one kernel. Returns
+// {mix out [rows, 2560], inject dots [rows, 4], hyper_input [rows, 10240] (= the combine's output)}.
+std::vector<at::Tensor> hc_combine_mix_w8(const at::Tensor & y, const at::Tensor & r, const at::Tensor & inj_prev,
+                                          const at::Tensor & w_norm, const at::Tensor & wd,
+                                          const at::Tensor & wd_s, const c10::optional<at::Tensor> & winj,
+                                          const at::Tensor & wu, const at::Tensor & wu_s, double eps,
+                                          at::Tensor & normed, at::Tensor & partial, at::Tensor & bar, bool pdl) {
+    check_mix8(r, w_norm, wd, wd_s, winj, wu, wu_s, normed, partial, bar);
+    const int rows = r.size(0);
+    TORCH_CHECK(y.scalar_type() == at::kBFloat16 && y.dim() == 2 && y.size(0) == rows && y.size(1) == HS && y.is_contiguous());
+    TORCH_CHECK(inj_prev.scalar_type() == at::kFloat && inj_prev.numel() == rows * NINJ && inj_prev.is_contiguous());
+    const c10::cuda::CUDAGuard guard(r.device());
+    auto out = at::empty({rows, HS}, r.options());
+    auto inj = at::empty({rows, NINJ}, r.options().dtype(at::kFloat));
+    auto xo = at::empty({rows, K}, r.options());
+    const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+    const int grid = (sms / HC) * HC;
+    TORCH_CHECK(grid * MAXJ >= HS && (grid / HC) * 7 >= NROWS, "too few SMs for hc_combine_mix_w8");
+    dispatch_mix8<true>(r, w_norm, wd, wd_s, winj.has_value() ? &winj.value() : nullptr, wu, wu_s, out, inj, normed,
+                        partial, bar, rows, (float) eps, grid, at::cuda::getCurrentCUDAStream(), pdl, &y, &inj_prev, &xo);
+    return {out, inj, xo};
 }

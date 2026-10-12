@@ -1,5 +1,5 @@
 {
-  "release": "0.5.21-pro6000-20261009-a16",
+  "release": "0.5.21-pro6000-20261010-kern",
   "sglang_version": "0.5.21",
   "base_image": "lmsysorg/sglang@sha256:b1259f3ea3275f66237c498ea388919729018bc9f01c3d638391e06e2cf3f469",
   "measured_local_image_digest": "sha256:ed0946e2e6d5c9859683adca049fc5dd517c3d11f7de99f77e27d7e0f2532ccb",
@@ -67,7 +67,7 @@
     {
       "path": "sglang/srt/qwenfast.py",
       "container_path": "/sgl-workspace/sglang/python/sglang/srt/qwenfast.py",
-      "sha256": "12098fc9384aa123f8a5f34438d5c31650e9b817aaf3b0cb7ddb43b08db49985"
+      "sha256": "e0b9ccbad110e06c24d9e45b57b8537eda0b65db7b1a5ca99d4eaaa774d8bd98"
     },
     {
       "path": "sglang/srt/speculative/eagle_draft_cuda_graph_runner.py",
@@ -95,22 +95,23 @@
     "source_dir": "/opt/qwenfast/src",
     "nvcc_flags": "-O3 -gencode=arch=compute_120a,code=sm_120a --use_fast_math -lineinfo (torch.utils.cpp_extension, the image nvcc 13.0)",
     "sources": {
-      "build_qf.py": "65d8a8f493a3633c3f288831af45cde97c99da464a92cb627db11176d64a5fd4",
-      "qf_bind.cpp": "0b37aa822bb1783eb0aa9d64d37d235e8a899b2304d20d3caf83358fd9ab2027",
+      "build_qf.py": "512059efc717d347648ec10945803407c1bbc21a676d918fce9a46f95bb34705",
+      "qf_bind.cpp": "47706c7955911a8d1335b05261572cd8be105d9cb10693185c917bf94ac317e8",
       "qf_gdnout.cu": "79f3ff03d1e4808ca2710106d40ab198cb765a176e4cb3c97930ea3ae4f7e41b",
       "qf_hc2.cu": "31e8c17ddf51314474f8d26c7a293106f9d689a0a67457f706de36d82c77d9f2",
-      "qf_hc8.cu": "591bdd60cade62b8ed952a78e1a294da0437f3c14add903c3344177b5b3d27aa",
+      "qf_hc8.cu": "f9bf2864b2a7ec1faf3bd290525091a04e4d1ed36d57644b2ba7e89dd8bd9d92",
       "qf_hcmix.cu": "e1af7ba84e6185bbf483517aef83d6b46a50ce6b04ca8349d825cafe710a348f",
       "qf_moe.cu": "a9a91a184c1f816d50863bc3371311ad150ffbd9fe34c2bcdfba0094f323ec18",
       "qf_pf.cu": "eab935bee6c07213ebcc2fa70ad55d32750178aefe7cc31a0c1b075d2ac17b45",
       "qf_pk.cu": "ca22809f7335c0e5e8a129dfb6ef56eaec2688463ede30323919668a6e9fdfe1",
-      "qf_router.cu": "1ead41909d9bfdbdfa286dbb10de17664c81e2a5e85e1f9ba232050498787430",
+      "qf_router.cu": "2363b104f94a87af2c39505352e5c536015fc0871465ca4ad95a93b7699762ca",
       "qf_sample.cu": "2b21eb8e087f74776a65bc2c4e804fa2e1e3dc3f1ff0371aecf953fd2066ea4a",
       "qf_smallm.cu": "6e00558a1b70bd8384efa9936bc46fdb6c3a3026469edb37c4124fb0e5e4848b",
       "qf_topk.cu": "0f5b42ea37092555499b45eb9e0f6f72eec7dcfc83783b15d5f25ac3f674d3db",
       "qf_w4s.cu": "9b7e1e2fd1331b88fdfd1054cb3092bd1cb00180fed05a720e36ac03bee27868",
       "qf_w8.cu": "ad6a3018f7b407bbac8e2a6948be8be7a38e0f624da231ea99686b89b478e2c4",
-      "qf_w8g.cu": "f5434eb681e711d400c4eb522449a7ad9e707c0dc6962a05c60789b7756fe6d4"
+      "qf_w8g.cu": "87d0e5e904d0f31c8e687173e9ce0c711223f5b72135167e310fbec8ca682f54",
+      "qf_a16moe.cu": "66202d15a364cc398c2e7222ab4e7fcdecf667bb79d2efd81304c4306f33fb21"
     }
   }
 }

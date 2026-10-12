@@ -7,6 +7,10 @@
 // w8g_gemm:   y[M, N] = x[M, K] @ (q * s)^T for 1..8 rows (decode / verify), fp32 accumulation: each lane sums
 //             q * x over its 16 (or 4) weights of one group, then scales the partial once.
 // w8g_unpack: BF16 copy of rows (bf16(q * s)) for the large-M path, which then runs the stock cuBLAS GEMM.
+// w8m (QWENFAST_W8M=1, K = 2560 / 6144): the same product on tensor cores. A CTA owns 16 weight rows; each warp
+// one K slice. Weights go to mma.m16n8k16 as A (int8 -> bf16 is exact: |q| <= 127), the tokens as B (n = 8, rows
+// >= M zero), fp32 accumulation per 64-weight block, then * group scale. x is read straight from L2 once per CTA
+// instead of once per weight row from shared memory.
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -169,6 +173,112 @@ void by_rpw(const at::Tensor & x, const at::Tensor & q, const at::Tensor & s, at
     if (rpw == 1) by_k<M, 1>(x, q, s, y, st); else if (rpw == 2) by_k<M, 2>(x, q, s, y, st); else by_k<M, 4>(x, q, s, y, st);
 }
 
+// 4 int8 -> two bf16x2 words (bytes 0,1 -> lo; 2,3 -> hi): float(q) is exact and has <= 7 mantissa bits,
+// so its upper 16 bits are the exact bf16
+__device__ __forceinline__ void i8x4_to_bf16x2(uint32_t u, uint32_t & lo, uint32_t & hi) {
+    u ^= 0x80808080u;
+    const float f0 = __int_as_float(__byte_perm(u, 0x4B000000u, 0x7440)) - 8388736.f;
+    const float f1 = __int_as_float(__byte_perm(u, 0x4B000000u, 0x7441)) - 8388736.f;
+    const float f2 = __int_as_float(__byte_perm(u, 0x4B000000u, 0x7442)) - 8388736.f;
+    const float f3 = __int_as_float(__byte_perm(u, 0x4B000000u, 0x7443)) - 8388736.f;
+    lo = __byte_perm(__float_as_uint(f0), __float_as_uint(f1), 0x7632);
+    hi = __byte_perm(__float_as_uint(f2), __float_as_uint(f3), 0x7632);
+}
+
+__device__ __forceinline__ void mma_bf16_16816(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+                                               uint32_t b0, uint32_t b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+
+__device__ __forceinline__ uint32_t u4w(const uint4 & v, int i) { return i == 0 ? v.x : i == 1 ? v.y : i == 2 ? v.z : v.w; }
+
+// NW warps x NB blocks of 64 = K. Within a block, thread (g = lane / 4, t = lane % 4) holds bytes [16t, 16t + 16)
+// of weight rows g and g + 8 and elements [16t, 16t + 16) of token g; mma step j consumes its bytes / elements
+// 4j..4j+3. That is a fixed permutation of k inside the block, applied to weights and x alike, so the dot
+// product is the same sum (the mma's own fragment layout would need 2-byte gathers).
+template <int NB, int NW>
+__global__ void __launch_bounds__(NW * 32) w8m_kernel(
+        const __nv_bfloat16 * __restrict__ x, const int8_t * __restrict__ q, const uint16_t * __restrict__ s,
+        __nv_bfloat16 * __restrict__ y, int N, int M, int ldx, int ldy) {
+    constexpr int K = NW * NB * 64, NG = K / 128;
+    __shared__ float red[NW][16][9];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, t = lane & 3;
+    const int row0 = blockIdx.x * 16;
+    const size_t ra = (size_t) min(row0 + g, N - 1), rb = (size_t) min(row0 + g + 8, N - 1);
+    const int kw = warp * NB * 64 + t * 16;
+    uint4 wa[NB], wb[NB];
+    uint16_t sa[NB], sb[NB];
+#pragma unroll
+    for (int b = 0; b < NB; ++b) {
+        wa[b] = __ldcs(reinterpret_cast<const uint4 *>(q + ra * K + kw + b * 64));
+        wb[b] = __ldcs(reinterpret_cast<const uint4 *>(q + rb * K + kw + b * 64));
+    }
+#pragma unroll
+    for (int b = 0; b < NB; ++b) {
+        const int grp = (warp * NB * 64 + b * 64) / 128;
+        sa[b] = __ldg(s + ra * NG + grp);
+        sb[b] = __ldg(s + rb * NG + grp);
+    }
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+    uint4 xv[NB][2];
+    const bool tok = g < M;
+#pragma unroll
+    for (int b = 0; b < NB; ++b) {
+        const uint4 * xp = reinterpret_cast<const uint4 *>(x + (size_t) (tok ? g : 0) * ldx + kw + b * 64);
+        xv[b][0] = tok ? __ldcg(xp) : make_uint4(0, 0, 0, 0);
+        xv[b][1] = tok ? __ldcg(xp + 1) : make_uint4(0, 0, 0, 0);
+    }
+    float acc[4] = {0.f, 0.f, 0.f, 0.f};
+#pragma unroll
+    for (int b = 0; b < NB; ++b) {
+        float d[4] = {0.f, 0.f, 0.f, 0.f};
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            uint32_t a0, a1, a2, a3;
+            i8x4_to_bf16x2(u4w(wa[b], j), a0, a2);
+            i8x4_to_bf16x2(u4w(wb[b], j), a1, a3);
+            const uint4 & xh = xv[b][j >> 1];
+            mma_bf16_16816(d, a0, a1, a2, a3, u4w(xh, (j & 1) * 2), u4w(xh, (j & 1) * 2 + 1));
+        }
+        const float sca = bf16_bits_to_f32(sa[b]), scb = bf16_bits_to_f32(sb[b]);
+        acc[0] = fmaf(d[0], sca, acc[0]);
+        acc[1] = fmaf(d[1], sca, acc[1]);
+        acc[2] = fmaf(d[2], scb, acc[2]);
+        acc[3] = fmaf(d[3], scb, acc[3]);
+    }
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    // d layout: [0] (row g, token 2t) [1] (g, 2t + 1) [2] (g + 8, 2t) [3] (g + 8, 2t + 1)
+    red[warp][g][2 * t] = acc[0];
+    red[warp][g][2 * t + 1] = acc[1];
+    red[warp][g + 8][2 * t] = acc[2];
+    red[warp][g + 8][2 * t + 1] = acc[3];
+    __syncthreads();
+    if (threadIdx.x < 16 * M) {
+        const int r = threadIdx.x & 15, m = threadIdx.x >> 4;
+        float v = 0.f;
+#pragma unroll
+        for (int w = 0; w < NW; ++w) v += red[w][r][m];
+        if (row0 + r < N) y[(size_t) m * ldy + row0 + r] = __float2bfloat16(v);
+    }
+}
+
+template <int NB, int NW>
+void launch_w8m(const at::Tensor & x, const at::Tensor & q, const at::Tensor & s, at::Tensor & y, cudaStream_t st) {
+    static const bool pdl = [] { const char * e = getenv("QWENFAST_W8M_PDL"); return e && atoi(e) != 0; }();
+    const int N = q.size(0);
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3((N + 15) / 16); cfg.blockDim = dim3(NW * 32); cfg.dynamicSmemBytes = 0; cfg.stream = st;
+    cudaLaunchAttribute attr[1];
+    attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attr[0].val.programmaticStreamSerializationAllowed = pdl ? 1 : 0;
+    cfg.attrs = attr; cfg.numAttrs = 1;
+    C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, w8m_kernel<NB, NW>, reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr()),
+        reinterpret_cast<const int8_t *>(q.data_ptr()), reinterpret_cast<const uint16_t *>(s.data_ptr()),
+        reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), N, (int) x.size(0), (int) x.stride(0), (int) y.stride(0)));
+}
+
 __global__ void w8g_unpack_kernel(const int8_t * __restrict__ q, const uint16_t * __restrict__ s,
                                   __nv_bfloat16 * __restrict__ w, long total8, int K, int G) {
     const long i = (long) blockIdx.x * blockDim.x + threadIdx.x;   // 8 weights per thread
@@ -202,6 +312,16 @@ at::Tensor w8g_gemm(const at::Tensor & x, const at::Tensor & q, const at::Tensor
     auto y = at::empty({x.size(0), q.size(0)}, x.options());
     if (rpw <= 0) rpw = x.size(0) == 1 ? 1 : 4;
     cudaStream_t st = at::cuda::getCurrentCUDAStream();
+    // rpw 0x100 forces the tensor-core kernel, 0x200 forbids it (tests); otherwise QWENFAST_W8M decides
+    static const bool w8m_on = [] { const char * e = getenv("QWENFAST_W8M"); return e && atoi(e) != 0; }();
+    const bool use_m = (rpw & 0x100) || (w8m_on && !(rpw & 0x200));
+    rpw &= 0xff;
+    if (use_m && (q.size(1) == 2560 || q.size(1) == 6144)) {
+        if (q.size(1) == 2560) launch_w8m<5, 8>(x, q, s, y, st);
+        else launch_w8m<6, 16>(x, q, s, y, st);
+        return y;
+    }
+    if (rpw <= 0) rpw = x.size(0) == 1 ? 1 : 4;
     switch (x.size(0)) {
         case 1: by_rpw<1>(x, q, s, y, (int) rpw, st); break;
         case 2: by_rpw<2>(x, q, s, y, (int) rpw, st); break;
