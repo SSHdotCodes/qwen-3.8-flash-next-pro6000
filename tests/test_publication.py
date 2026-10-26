@@ -1,4 +1,5 @@
 import importlib.util
+import copy
 import json
 import os
 from pathlib import Path
@@ -126,7 +127,33 @@ class LauncherTests(unittest.TestCase):
 
 
 class EvidenceTests(unittest.TestCase):
-    def test_prepared_views_enable_the_installed_loader(self):
+    def test_intentional_public_differences_preserve_installed_hashes(self):
+        spec = importlib.util.spec_from_file_location("verify_runtime", ROOT / "serve/verify-runtime.py")
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
+        manifest = json.loads((ROOT / "serve/runtime.json").read_text())
+        differences = verifier.public_differences(manifest)
+        expected = {
+            "sglang/srt/model_loader/loader.py": "ce8a8cf3c6c2b52ea5d574fcdd9312086c680278146f12429323ad9f8af76b31",
+            "sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py":
+                "d3a9930c7d97d7c56571155b9d797c3803aafa406ae28b4d79900d5685b3b901",
+        }
+        self.assertEqual({e["path"]: e["installed_sha256"] for e in differences}, expected)
+        measured = {"files": {e["path"]: {
+            "mount": e["container_path"], "sha256": e.get("installed_sha256", e["sha256"]),
+        } for e in manifest["files"]}}
+        verifier.compare_installed_files(manifest, measured)
+        # An intentional rename must not allow arbitrary source changes to be ignored.
+        altered = copy.deepcopy(measured)
+        altered["files"]["sglang/srt/model_loader/loader.py"]["sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "Installed reference checksum mismatch"):
+            verifier.compare_installed_files(manifest, altered)
+        undocumented = copy.deepcopy(manifest)
+        del next(e for e in undocumented["files"] if "installed_sha256" in e)["public_difference"]
+        with self.assertRaisesRegex(ValueError, "Incomplete public/installed difference"):
+            verifier.public_differences(undocumented)
+
+    def test_prepared_views_enable_the_public_loader(self):
         spec = importlib.util.spec_from_file_location("prepare_model", ROOT / "serve/prepare-model.py")
         prepare_model = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(prepare_model)
@@ -150,9 +177,9 @@ class EvidenceTests(unittest.TestCase):
                 self.assertEqual(view["text_config"]["layer_types"], ["full_attention", "linear_attention"])
                 self.assertTrue((dest / "model.safetensors").is_symlink())
                 if kind == "target":
-                    self.assertTrue(view["vega_redhat_streamed_load"])
+                    self.assertTrue(view["redhat_streamed_load"])
                     self.assertEqual(view["text_config"]["ple_embedding_dtype"], "bfloat16")
-                    self.assertIn('"vega_redhat_streamed_load", False',
+                    self.assertIn('"redhat_streamed_load", False',
                                   (ROOT / "serve/overlays/sglang/srt/model_loader/loader.py").read_text())
                 else:
                     self.assertNotIn("quantization_config", view)

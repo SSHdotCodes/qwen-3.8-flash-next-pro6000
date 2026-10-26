@@ -32,7 +32,9 @@
     {
       "path": "sglang/srt/model_loader/loader.py",
       "container_path": "/sgl-workspace/sglang/python/sglang/srt/model_loader/loader.py",
-      "sha256": "ce8a8cf3c6c2b52ea5d574fcdd9312086c680278146f12429323ad9f8af76b31"
+      "sha256": "4130404a94b4f6d3ee97d1bf37906215f223698250172b99b9660c6628840512",
+      "installed_sha256": "ce8a8cf3c6c2b52ea5d574fcdd9312086c680278146f12429323ad9f8af76b31",
+      "public_difference": "Rename the workstation-prefixed bounded-loading config key to redhat_streamed_load, coordinated with prepare-model.py."
     },
     {
       "path": "sglang/srt/models/qwen4_exp.py",
@@ -87,7 +89,9 @@
     {
       "path": "sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py",
       "container_path": "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py",
-      "sha256": "d3a9930c7d97d7c56571155b9d797c3803aafa406ae28b4d79900d5685b3b901"
+      "sha256": "7c750c2c6f6e6433be95a73db0d635308a7a00169bf5a44da9566295c3654621",
+      "installed_sha256": "d3a9930c7d97d7c56571155b9d797c3803aafa406ae28b4d79900d5685b3b901",
+      "public_difference": "Remove the workstation name from the dated October 9 comment; executable code is unchanged."
     },
     {
       "path": "sglang/srt/glue_attn.py",

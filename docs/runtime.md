@@ -110,7 +110,7 @@ writes its measurements to `/tmp` (`QWENFAST_TEST_OUT`). The published results a
 - **Layer labels:** SGLang 0.5.21 calls the QSA blocks `full_attention`.
 - **Target scope:** the target view keeps the BF16 PLE table (`ple_embedding_dtype`). It adds an ignore rule
   limiting quantization to `mlp.experts`, because Qwen4's runtime flattens module prefixes that the checkpoint's
-  own ignore list names. It also sets `vega_redhat_streamed_load`, which `model_loader/loader.py` reads to stage the
+  own ignore list names. It also sets `redhat_streamed_load`, which `model_loader/loader.py` reads to stage the
   checkpoint in bounded memory.
 - **Draft view:** keeps only the `mtp.*` tensors and drops the quantization config. FP8 is applied online.
 - **Per-expert activation scales:** RedHatAI stores one GEMM2 activation scale per expert, and the W4A4 MoE decode
@@ -202,13 +202,41 @@ The [October 20 report](../results/20261020/REPORT.md) records 303.8 tok/s and 1
 **Decode-path KLD was not re-measured.** The public checkout build, regenerated draft artifact and
 ported GPU suites still need verification; see [the draft checklist](../RELEASE_NOTES_DRAFT.md).
 
-The 27 Python overlay files and hot map match the installed manifest exactly, including the two
-source/comment differences documented by older releases. `prepare-model.py` now sets the
-installed loader's `vega_redhat_streamed_load` config key; retaining the earlier public key would
-silently disable bounded checkpoint loading. All 26 kernel compilation units are pinned
+Of the 27 Python overlays and hot map, **26 files match the measured installed manifest byte for byte**.
+Two overlay files have the intentional public/installed differences listed below. The public target
+view and public loader both use `redhat_streamed_load`, so bounded checkpoint loading remains enabled.
+All 26 kernel compilation units are pinned
 separately from headers, the build script and optional support/test sources. The standalone module
 in `head_run.cpp` is disabled unless `WP_HEAD_STANDALONE` is defined; the shared build has only the
 `qf_bind.cpp` module. `gdn_replay_update.cuh` is pinned as an included dependency.
+
+### Intentional public/installed differences
+
+This follows the earlier public-release convention. These are the complete source/config differences
+introduced when removing workstation-specific naming:
+
+| Public file | Intentional difference from the measured installation |
+|---|---|
+| `serve/overlays/sglang/srt/model_loader/loader.py` | Reads `redhat_streamed_load` instead of the installed workstation-prefixed config key. No loading algorithm changes. |
+| `serve/overlays/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py` | Dated comment starts `2026-10-09:`; the workstation name is omitted. Executable code is unchanged. |
+| `serve/prepare-model.py` | Writes `redhat_streamed_load` in the target view to match the public loader; the installed target config uses a workstation-prefixed spelling. |
+
+`tests/test_publication.py` checks the coordinated public key, and `docs/runtime.md` describes it. Those
+support files do not have mounted counterparts in the installed runtime. The draft config is unchanged.
+
+`serve/runtime.json` uses `sha256` for each public file. The two changed overlays also retain
+`installed_sha256` and a `public_difference` explanation. The measured manifest digest stays unchanged.
+`verify-runtime.py` checks the public hashes locally and in the rebuilt public image (`--installed`);
+that flag does not mean the original workstation overlays are byte-identical. To compare with a saved
+measured manifest without accessing the workstation, run:
+
+```bash
+python3 serve/verify-runtime.py --installed-manifest /path/to/saved/manifest.json
+```
+
+The comparison verifies the saved manifest digest and reports 26 identical file hashes plus two
+intentional differences with pinned installed hashes. An unrecorded difference or changed installed
+reference is rejected. Kernel sources/bindings and the token map still match the installed bytes.
 
 The launcher reproduces the installed unit's environment and SGLang flags. New explicit variables:
 

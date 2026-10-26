@@ -10,17 +10,19 @@ Do not carry the October 10 KLD into the October 20 release-table cell.
 
 ## Verified locally
 
-- Installed overlay files match the source manifest, with the unchanged hot map included.
+- Public overlay/map hashes verify against `runtime.json`. Against the measured installed manifest,
+  26 file hashes match and two overlays intentionally differ (public loader key and dated comment).
+  [Every public/installed source/config difference is listed here](docs/runtime.md#intentional-publicinstalled-differences).
 - Kernel sources and bindings match independent read-only checksums of the installed source directory.
 - Launcher environment and normalized SGLang arguments match the installed unit; container paths retain
   the public layout and source files are baked into the image rather than mounted from workstation paths.
-- `python3 -m unittest discover -s tests -v`: **13 tests passed**, including all launcher flags/env,
+- `python3 -m unittest discover -s tests -v`: **14 tests passed**, including all launcher flags/env,
   model-view preparation, source integrity and benchmark aggregation checks.
 - `python3 serve/verify-runtime.py`: **28 runtime files, 32 kernel/support sources and 97,800 draft IDs verified**.
 - Parsed all **82 Python** and **56 JSON** files; `bash -n` passed for all **5 shell scripts**.
   `git diff --cached --check`, relative release-document links and a staged sensitive-data scan passed.
 - Target/draft configs generated from the pinned public checkpoint config match the installed config
-  objects exactly. The live i12 benchmark download matches the recorded raw-results digest, and the
+  objects after the documented target loading-key rename; the draft config is unchanged. The live i12 benchmark download matches the recorded raw-results digest, and the
   public harness's four prompts match the recorded benchmark.
 - `decode-summary.json` reproduces the eight-run, four-profile 303.7750964 tok/s mean using timings only.
 - Third-party notices and original source headers are retained; no weights, private activation captures,

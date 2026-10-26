@@ -195,8 +195,9 @@ The [runtime notes](docs/runtime.md) cover:
 - startup loading and the draft hot-token map;
 - the decode kernels and the October changes.
 
-The 27 Python overlay files, unchanged draft token map, and kernel sources/bindings match the installed
-kern2 files byte for byte. `serve/runtime.json` pins 26 compilation units plus the build script, header
+The kernel sources/bindings, unchanged draft token map and 25 of 27 Python overlays match the installed
+kern2 files byte for byte. Two overlays intentionally differ: a coordinated public config-key rename
+and a comment edit, listed in the [public/installed differences](docs/runtime.md#intentional-publicinstalled-differences). `serve/runtime.json` pins 26 compilation units plus the build script, header
 and optional support sources. The image compiles the extension itself, so library bytes may differ
 from the recorded workstation binary. The October 20 public image has **not** been rebuilt or GPU-tested
 as part of packaging; the [release draft](RELEASE_NOTES_DRAFT.md) lists the remaining checks.

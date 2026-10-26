@@ -42,7 +42,7 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
             )
         self.group_size = 16
         self.use_flashinfer_trtllm = get_moe_runner_backend().is_flashinfer_trtllm()
-        # Vega (2026-10-09): QWEN_NVFP4_MARLIN=1 runs the same NVFP4 weights as W4A16 through SGLang's Marlin
+        # 2026-10-09: QWEN_NVFP4_MARLIN=1 runs the same NVFP4 weights as W4A16 through SGLang's Marlin
         # NVFP4 MoE kernels (BF16 activations instead of FP4-quantized ones; full-vocab KLD 0.0175 -> 0.0106).
         self.use_marlin = os.environ.get("QWEN_NVFP4_MARLIN", "0") == "1"
         if self.use_marlin and self.use_flashinfer_trtllm:

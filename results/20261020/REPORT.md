@@ -178,8 +178,12 @@ they have **not** been run on a GPU as part of this packaging work.
 
 `serve/runtime.json` pins all shipped overlay bytes, kernel compilation units and supporting headers,
 the public base image, measured local image/library digests, model revision, measured draft artifact
-hash, preparation source, environment and server arguments. Every overlay matches the installed
-manifest byte for byte; the kernel sources/bindings match the installed source directory. Rebuilt
+hash, preparation source, environment and server arguments. Of the 28 overlay/map files, 26 match the
+installed manifest byte for byte. The loader uses the public `redhat_streamed_load` key, coordinated
+with `prepare-model.py`, and one quantization comment omits the workstation name. These two intentional
+overlay differences retain separate public/installed hashes and are fully listed in the
+[public/installed differences](../../docs/runtime.md#intentional-publicinstalled-differences).
+The kernel sources/bindings match the installed source directory. Rebuilt
 extension bytes can differ because build paths and tooling affect them. The measured local image
 digest is not a public registry image.
 

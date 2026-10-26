@@ -20,9 +20,39 @@ def build_sources(path):
     raise ValueError(f"No SRC list in {path}")
 
 
-def verify(installed=False, draft_a16=None):
+def public_differences(manifest):
+    differences = []
+    for entry in manifest["files"]:
+        has_reference = "installed_sha256" in entry
+        if has_reference != bool(entry.get("public_difference")):
+            raise ValueError(f"Incomplete public/installed difference: {entry['path']}")
+        if has_reference:
+            if (not re.fullmatch(r"[0-9a-f]{64}", entry["installed_sha256"])
+                    or entry["installed_sha256"] == entry["sha256"]):
+                raise ValueError(f"Invalid installed reference checksum: {entry['path']}")
+            differences.append(entry)
+    return differences
+
+
+def compare_installed_files(manifest, measured):
+    """Compare public pins with a saved source manifest without normalizing away differences."""
+    public_differences(manifest)
+    measured_hashes = {entry["mount"]: entry["sha256"] for entry in measured["files"].values()}
+    for entry in manifest["files"]:
+        expected = entry.get("installed_sha256", entry["sha256"])
+        if measured_hashes.get(entry["container_path"]) != expected:
+            raise ValueError(f"Installed reference checksum mismatch: {entry['path']}")
+
+
+def verify(installed=False, draft_a16=None, installed_manifest=None):
     root = Path(__file__).resolve().parent
     manifest = json.loads((root / "runtime.json").read_text())
+    differences = public_differences(manifest)
+    if installed_manifest is not None:
+        data = installed_manifest.read_bytes()
+        if hashlib.sha256(data).hexdigest() != manifest["installed_manifest_sha256"]:
+            raise ValueError("Measured installed manifest checksum mismatch")
+        compare_installed_files(manifest, json.loads(data))
     for entry in manifest["files"]:
         path = (
             Path(entry["container_path"])
@@ -86,11 +116,18 @@ def verify(installed=False, draft_a16=None):
         f" and {manifest['draft_hot_ids']:,} draft IDs"
         + ("; installed package versions match" if installed else "")
     )
+    for entry in differences:
+        print(f"Intentional public/installed difference: {entry['path']}: {entry['public_difference']}")
+    if installed_manifest is not None:
+        print(f"Compared measured installed manifest: {len(manifest['files']) - len(differences)}"
+              f" identical file hashes; {len(differences)} intentional differences with pinned installed hashes")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--installed", action="store_true")
     parser.add_argument("--draft-a16", type=Path, help="Also check a copied measured artifact's exact file hash")
+    parser.add_argument("--installed-manifest", type=Path,
+                        help="Also compare against a saved measured source manifest, reporting intentional differences")
     args = parser.parse_args()
-    verify(args.installed, args.draft_a16)
+    verify(args.installed, args.draft_a16, args.installed_manifest)
