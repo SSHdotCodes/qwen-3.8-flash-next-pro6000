@@ -1,4 +1,4 @@
-# Runtime notes — 2026-09-19, decode kernels 2026-09-24, RedHatAI and decode work 2026-10-05, W4A16 2026-10-09, decode kernels 2026-10-10
+# Runtime notes — 2026-09-19, decode kernels 2026-09-24, RedHatAI and decode work 2026-10-05, W4A16 2026-10-09, decode kernels 2026-10-10, kern2 2026-10-20
 
 ## Reproducible image
 
@@ -110,7 +110,7 @@ writes its measurements to `/tmp` (`QWENFAST_TEST_OUT`). The published results a
 - **Layer labels:** SGLang 0.5.21 calls the QSA blocks `full_attention`.
 - **Target scope:** the target view keeps the BF16 PLE table (`ple_embedding_dtype`). It adds an ignore rule
   limiting quantization to `mlp.experts`, because Qwen4's runtime flattens module prefixes that the checkpoint's
-  own ignore list names. It also sets `redhat_streamed_load`, which `model_loader/loader.py` reads to stage the
+  own ignore list names. It also sets `vega_redhat_streamed_load`, which `model_loader/loader.py` reads to stage the
   checkpoint in bounded memory.
 - **Draft view:** keeps only the `mtp.*` tensors and drops the quantization config. FP8 is applied online.
 - **Per-expert activation scales:** RedHatAI stores one GEMM2 activation scale per expert, and the W4A4 MoE decode
@@ -195,6 +195,94 @@ Kernel tests for these paths (GPU, inside the image):
 `test_w8m.py`, `test_hc8c.py` and `test_router3.py` import `build_qf` from `/ext`, so mount `serve/qwenfast` there.
 `test_hc8c.py` and `test_router3.py` also load the previous build's library from `/prod/qwenfast.so`.
 `test_router3.py` runs twice: `prod` first, which writes `/ext/rt3-prod.pt`, then `new`.
+
+## October 20 kern2
+
+The [October 20 report](../results/20261020/REPORT.md) records 303.8 tok/s and 125.2 verify steps/s.
+**Decode-path KLD was not re-measured.** The public checkout build, regenerated draft artifact and
+ported GPU suites still need verification; see [the draft checklist](../RELEASE_NOTES_DRAFT.md).
+
+The 27 Python overlay files and hot map match the installed manifest exactly, including the two
+source/comment differences documented by older releases. `prepare-model.py` now sets the
+installed loader's `vega_redhat_streamed_load` config key; retaining the earlier public key would
+silently disable bounded checkpoint loading. All 26 kernel compilation units are pinned
+separately from headers, the build script and optional support/test sources. The standalone module
+in `head_run.cpp` is disabled unless `WP_HEAD_STANDALONE` is defined; the shared build has only the
+`qf_bind.cpp` module. `gdn_replay_update.cuh` is pinned as an included dependency.
+
+The launcher reproduces the installed unit's environment and SGLang flags. New explicit variables:
+
+| Variable | Selected behavior |
+|---|---|
+| `QWEN_MTP_A16=/opt/qwen-draft-a16.pt` | Draft NVFP4 A16 routed experts, INT8 shared expert; frees unused FP8 copies |
+| `QWENFAST_HC_WP=1` | Module-specific fast HC mix/combine scheduling |
+| `QWENFAST_ATTN=1` | Fused QSA norm/RoPE/store and count packing |
+| `QWENFAST_HEAD_SCREEN=1` | Target head screen for top_k 1–56 without logprobs, grammar, penalties, min_p or logit bias |
+| `QWEN_MTP_HOT_SCREEN2=1` | Two-stage INT2/INT4 draft hot-head screen at M=1 |
+| `QWENFAST_GDN_REPLAY=1` | Replay accepted GDN deltas on commit; snapshot fallback for unsupported paths |
+| `QWENFAST_GDNOUT_WP=1` | New GDN output projection |
+| `QWENFAST_GDNOUT_VARIANT=replay` | Output preset paired with replay |
+
+Candidate-only draft sampling and speculative relay/QSA/sequence/stack fusions default on in the
+shipped overlays, as on the installed unit; they do not need additional launcher env flags. Optional
+index prep/MQA/linear and PLE extras remain off; cached top-k row starts default on. Each kernel retains its supported-shape/dtype gate and fallback.
+GDN replay and output must be assessed together: each was flat alone. Merely removing the October 10
+flags does not reconstruct an earlier runtime while these newer overlays/artifacts remain active.
+Use the earlier release checkout/image for a controlled rollback.
+
+The target head's candidate values are exact W8M results, but the sigma screen's inclusion guarantee
+is empirical (602 captured inputs passed), not a proof over every input. Ineligible requests use a
+dense fallback; the recorded dense-head overhead was about 56 µs per call versus the old dense head.
+Draft-screen misses change only proposal/acceptance under correct rejection sampling.
+
+### Draft artifact preparation
+
+After model download, run `./serve/prepare-draft-a16.sh` explicitly on an idle GPU. The script uses the
+same pinned image and model view, no network, and saves a tensor-only torch archive plus provenance.
+`DRAFT_A16` selects the host output/mount path. It refuses an existing output. The recipe is adapted
+from the October 20 converter, with seeded synthetic validation replacing private activation captures.
+It validates M=1/4 A16 outputs against dequantized FP32 arithmetic before saving; it has not yet been
+executed during public packaging.
+
+The measured artifact hash is `f397eaae4919d1b6d8e2553c1fae3bed5f3a17081baac03f449fcb90a4919c11`.
+Serialization can change archive bytes; a fresh conversion needs tensor/layout and end-to-end GPU
+validation even if its file hash differs only because of serialization. To check a copied measured
+artifact's exact bytes without loading torch: `python3 serve/verify-runtime.py --draft-a16 PATH`.
+The default verifier checks sources and preparation hashes; `--installed` additionally checks packages
+and library presence. It does not claim rebuilt binaries equal the measured binary or validate an
+external draft artifact automatically.
+
+### Ported work-package GPU tests
+
+The image includes these scripts in `/opt/qwenfast/src`. They load the integrated extension and
+shipped Python overlays. Run on a dedicated idle GPU inside the built image, for example:
+
+```bash
+docker run --rm --gpus all --network none --entrypoint python3 \
+  local/qwen-flash-next:0.5.21-20261020-kern2 /opt/qwenfast/src/test_hc_kern2.py
+```
+
+| Script | Public coverage |
+|---|---|
+| `test_hc_kern2.py` | WP-HC M=1–8, mix/combine, inject/no-inject, both selected variants, bitwise outputs |
+| `test_attn_cached_topk.py` | WP-Attn cached row starts vs original top-k sets |
+| `test_attn_prepare.py` | WP-Attn synthetic norm/RoPE/KV-store and FP8 edge values |
+| `test_head_kern2.py` | WP-Head candidate/top-k, dense/overflow fallback and mutable graph inputs |
+| `test_drafthead_edges.py` | WP-DraftHead full rescore, ties, histogram saturation and strided input |
+| `test_spec_fused.py` | WP-Spec sequence/bonus/extend helpers and mrope expressions |
+| `test_spec_qsa.py` | WP-Spec fused metadata vs retained unfused path, including untouched buffers |
+| `test_spec_relay.py` | WP-Spec scheduler relay scenarios vs elision disabled |
+| `test_gdn_pool_activation.py` | WP-GDN actual pool allocation and layer views, on/off and BF16/FP32 |
+| `test_gdn_replay.py` | WP-GDN synthetic verify/commit, tree/snapshot fallback, tracking and sequential acceptance |
+| `test_gdnout_kern2.py` | WP-GDNout both presets/gates, M=1–8 and mutable-graph bitwise outputs |
+
+`test_head_kern2.py` additionally needs the pinned target at `/models/target` (`QWEN_TARGET` overrides it).
+Mount its view there and the backing `HF_CACHE` at the same host path so symlinks resolve. Run
+`test_gdn_replay.py` twice, passing `WPGDN_STATE_DTYPE=bfloat16` and `WPGDN_STATE_DTYPE=float32`.
+Standalone FP32-state kernel coverage does not imply the current FlashInfer model backend supports
+FP32 state. The public ports use synthetic inputs/weights where the originals used activation
+captures. They do not reproduce the original captured-input cohorts or cold-neighbor timing tables,
+and have only been syntax-checked during packaging. No GPU tests were executed for this release draft.
 
 ## Token-map provenance
 

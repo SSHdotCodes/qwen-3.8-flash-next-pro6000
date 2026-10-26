@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <optional>
 
 at::Tensor smallm_gemm(const at::Tensor & x, const at::Tensor & w, int64_t rpw, int64_t unroll);
 at::Tensor hc_mix(const at::Tensor & x, const at::Tensor & wd, const at::Tensor & wu, at::Tensor & partial, at::Tensor & bar);
@@ -52,6 +53,34 @@ std::vector<at::Tensor> hc_combine_mix_w8(const at::Tensor & y, const at::Tensor
 std::vector<at::Tensor> topk_rows(const at::Tensor & x, int64_t k);
 at::Tensor w4g_gemm(const at::Tensor & x, const at::Tensor & q, const at::Tensor & s);
 at::Tensor rows_dot_i8(const at::Tensor & x, const at::Tensor & q, const at::Tensor & s, const at::Tensor & idx);
+std::vector<at::Tensor> hc_mix_fused_w8_fast(const at::Tensor & x, const at::Tensor & w_norm, const at::Tensor & wd,
+                                        const at::Tensor & wd_s, const c10::optional<at::Tensor> & winj,
+                                        const at::Tensor & wu, const at::Tensor & wu_s, double eps,
+                                        at::Tensor & normed, at::Tensor & partial, at::Tensor & bar, bool pdl);
+std::vector<at::Tensor> hc_combine_mix_w8_fast(const at::Tensor & y, const at::Tensor & r, const at::Tensor & inj_prev,
+                                          const at::Tensor & w_norm, const at::Tensor & wd,
+                                          const at::Tensor & wd_s, const c10::optional<at::Tensor> & winj,
+                                          const at::Tensor & wu, const at::Tensor & wu_s, double eps,
+                                          at::Tensor & normed, at::Tensor & partial, at::Tensor & bar, bool pdl);
+std::vector<at::Tensor> hc_mix_fused_w8_g96fast(const at::Tensor & x, const at::Tensor & w_norm, const at::Tensor & wd,
+                                        const at::Tensor & wd_s, const c10::optional<at::Tensor> & winj,
+                                        const at::Tensor & wu, const at::Tensor & wu_s, double eps,
+                                        at::Tensor & normed, at::Tensor & partial, at::Tensor & bar, bool pdl);
+std::vector<at::Tensor> hc_combine_mix_w8_g96fast(const at::Tensor & y, const at::Tensor & r, const at::Tensor & inj_prev,
+                                          const at::Tensor & w_norm, const at::Tensor & wd,
+                                          const at::Tensor & wd_s, const c10::optional<at::Tensor> & winj,
+                                          const at::Tensor & wu, const at::Tensor & wu_s, double eps,
+                                          at::Tensor & normed, at::Tensor & partial, at::Tensor & bar, bool pdl);
+void wpgdn_replay_commit(at::Tensor, const at::Tensor &, const at::Tensor &, const at::Tensor &, const at::Tensor &,
+                         const at::Tensor &, const at::Tensor &, const at::Tensor &, const std::optional<at::Tensor> &,
+                         const std::optional<at::Tensor> &);
+at::Tensor head_pack_hi(const at::Tensor &);
+void head_set_carveout(int64_t);
+std::vector<at::Tensor> head_run(const at::Tensor & h, const at::Tensor & q, const at::Tensor & s, const at::Tensor & hi,
+                                 const at::Tensor & karg, const at::Tensor & dense, double z, int64_t cap, int64_t rpw);
+std::vector<at::Tensor> cand_trunc_sample(const at::Tensor & exact, const at::Tensor & cidx, const at::Tensor & hot_ids,
+                                          const at::Tensor & temps, const at::Tensor & top_ks, const at::Tensor & top_ps,
+                                          const at::Tensor & expo, at::Tensor & q);
 std::vector<at::Tensor> trunc_sample(const at::Tensor & vals, const at::Tensor & idx, const at::Tensor & temps,
                                      const at::Tensor & top_ks, const at::Tensor & top_ps, const at::Tensor & expo,
                                      at::Tensor & q);
@@ -66,6 +95,17 @@ torch::Tensor a16_moe_decode(torch::Tensor x, torch::Tensor topk_ids, torch::Ten
                              torch::Tensor out, int64_t phase, torch::Tensor dbg, torch::Tensor pbuf,
                              torch::Tensor shq1, torch::Tensor shs1, torch::Tensor shq2, torch::Tensor shs2,
                              torch::Tensor shbuf);
+
+// WP-DraftHead: INT2 screen -> threshold superset -> INT4 rescore -> top-64 (M=1 draft hot head)
+at::Tensor drafthead_q2(const at::Tensor&, const at::Tensor&, const at::Tensor&);
+at::Tensor drafthead_threshold(const at::Tensor&, int64_t);
+std::vector<at::Tensor> drafthead_rescore(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                                          const at::Tensor&);
+std::vector<at::Tensor> drafthead_screen(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                                         const at::Tensor&, int64_t);
+// WP-GDNout: gated norm once + INT8 out_proj (bitwise equal to gdn_norm_oproj_w8); variant 0 stream, 1 replay
+at::Tensor wpgdnout_w8(const at::Tensor&, const at::Tensor&, const at::Tensor&, double, bool, const at::Tensor&,
+                       const at::Tensor&, int64_t);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("smallm_gemm", &smallm_gemm, "small-M bf16 gemm y = x @ w^T", py::arg("x"), py::arg("w"), py::arg("rpw") = 0, py::arg("unroll") = 0);
@@ -100,5 +140,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("w4g_gemm", &w4g_gemm, "small-M gemm on 4-bit group-scaled weights (draft hot-head screening)");
     m.def("rows_dot_i8", &rows_dot_i8, "exact int8 logits of selected rows (draft hot-head screening)");
     m.def("a16_moe_decode", &a16_moe_decode, "decode W4A16 routed experts on Marlin-packed NVFP4 + shared gate (1..8 tokens)");
+    m.def("hc_mix_fused_w8_fast", &hc_mix_fused_w8_fast, "WP-HC: hc_mix_fused_w8, token-parallel exact-order norm");
+    m.def("hc_combine_mix_w8_fast", &hc_combine_mix_w8_fast, "WP-HC: hc_combine_mix_w8, token-parallel exact-order norm");
+    m.def("hc_mix_fused_w8_g96fast", &hc_mix_fused_w8_g96fast, "WP-HC: 96-CTA hc_mix_fused_w8 (rows <= 4)");
+    m.def("hc_combine_mix_w8_g96fast", &hc_combine_mix_w8_g96fast, "WP-HC: 96-CTA hc_combine_mix_w8 (rows <= 4)");
+    m.def("wpgdn_replay_commit", &wpgdn_replay_commit, "WP-GDN: exact replay-on-commit of accepted GDN verify tokens");
+    m.def("head_pack_hi", &head_pack_hi, "WP-Head: high-nibble plane of the INT8 target head");
+    m.def("head_set_carveout", &head_set_carveout, "WP-Head: shared-memory carveout of the fused screen kernel");
+    m.def("head_run", &head_run, "WP-Head: screened exact target lm_head (device k and dense flag)");
+    m.def("cand_trunc_sample", &cand_trunc_sample, "truncated draft proposal straight from hot-head screening candidates");
+    m.def("drafthead_q2", &drafthead_q2, "WP-DraftHead: packed INT2 g64 hot-head screen logits");
+    m.def("drafthead_threshold", &drafthead_threshold, "WP-DraftHead: histogram threshold keeping a superset of the top-C");
+    m.def("drafthead_rescore", &drafthead_rescore, "WP-DraftHead: INT4 rescore of the threshold survivors, top-64");
+    m.def("drafthead_screen", &drafthead_screen, "WP-DraftHead: INT2 screen + threshold + INT4 rescore -> (vals, ids) top-64");
+    m.def("wpgdnout_w8", &wpgdnout_w8, "WP-GDNout: gated RMSNorm once + INT8 out_proj, early release");
     m.def("spec_topk_chain", &spec_topk_chain, "top-k/top-p renorm on top candidates + chain rejection sampling");
 }

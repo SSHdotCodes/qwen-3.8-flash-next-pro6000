@@ -4,10 +4,14 @@ SGLang **0.5.21** setup for one RTX PRO 6000 Blackwell (SM120, 96 GB): the
 RedHatAI NVFP4 checkpoint, **262,144-token context**, two request slots, a
 786,432-token FP8 KV pool and exact speculative rejection sampling.
 
-The October 10 release adds decode kernels to the October 9 build: **111.0 verify steps/s, up from
-102.0** (+8.8%, both builds measured the same day), with **quality unchanged**: decode-path KLD against
-BF16 0.011134 to 0.011127. The public image built from this checkout decodes at **264.5 tok/s** with the
-decode protocol below, against 240.9 for the October 9 public image measured the same way.
+The October 20 **kern2** runtime records **303.8 tok/s and 125.2 verify steps/s**, up from
+259.4 tok/s and 111.1 steps/s for the October 10 installed control measured in the same round.
+It adds draft A16 experts, HC/QSA/head/speculative bookkeeping improvements and paired GDN replay/output
+kernels. **Decode-path KLD was not re-measured for kern2.** The public image build and GPU reproduction
+remain pending; see [release draft checks](RELEASE_NOTES_DRAFT.md).
+
+The October 10 public image measured 264.5 tok/s and 111.0 verify steps/s, with decode-path KLD
+0.011127 against BF16. Those are historical October 10 measurements, not kern2 quality evidence.
 
 The October 9 release decoded at 243 tok/s, up from 199.5 on October 5. It also moved
 closer to the original model: full-vocabulary KLD against BF16 fell from 0.0178 to 0.0111,
@@ -20,15 +24,19 @@ ones. The agent tool-use bench rose from 105 to 112 of 120.
 | October 5: exact 12-bit dense weights, FP8 draft, 97,800-ID draft map | 199.5 | 87.0 | 0.0175 | 2.03 s | [Oct 5](results/20261005/REPORT.md) |
 | October 9: INT8 dense weights, truncated draft proposals, new kernels | 244.4 | 103.1 | 0.0178 | 2.04 s | [Oct 9](results/20261009/REPORT.md) |
 | October 9: W4A16 routed experts | 243.4 | 100.8 | 0.0111 | 2.37 s | [Oct 9](results/20261009/REPORT.md) |
-| **October 10: persistent W4A16 MoE, tensor-core INT8 GEMM, fused HC combine (current)** | **264.5** | **111.0** (same-day baseline 102.0) | **0.0111** | | [Oct 10](results/20261010/REPORT.md) |
+| **October 10: persistent W4A16 MoE, tensor-core INT8 GEMM, fused HC combine** | **264.5** | **111.0** (same-day baseline 102.0) | **0.0111** | | [Oct 10](results/20261010/REPORT.md) |
+| **October 20: kern2 (current packaged runtime)** | **303.8** | **125.2** (same-round control 111.1) | **Not re-measured** | Not re-measured at 32K | [Oct 20](results/20261020/REPORT.md) |
+| **October 26: TODO, awaiting GPU work** | TODO | TODO | TODO | TODO | [Draft placeholder](RELEASE_NOTES_DRAFT.md#todo-october-26-update) |
 
 Decode protocol: `bench/decode_bench.py`, single requests of 4,096 generated tokens
-including reasoning, four profiles (code, agent, prose, Chinese) with three runs each, `xhigh`,
+including reasoning, four profiles (code, agent, prose, Chinese), `xhigh`,
 recommended sampling (`temperature=1.0`, `top_p=0.95`, `top_k=20`). Per-request rates move with
 how many draft tokens the sampled text accepts; verify steps per second is the steadier
-measure. KLD is measured over 45,610 positions against true BF16 logits.
+measure. October 20 uses **two** runs per profile and the installed runtime; October 10's public
+image check uses three. October 10 KLD uses 45,610 positions against true BF16 logits; kern2 has no new KLD result.
 
 The October 10 row differs in three ways:
+
 - Its step rates are medians over server log lines (`bench/step_median.py`), with the October 9 build
   re-measured the same day at 102.0. The earlier rows use `bench/accept_window.py`, so compare 111.0 with
   102.0, not with 100.8.
@@ -41,20 +49,23 @@ The October 10 row differs in three ways:
 Sustained 1,536-token generations on the production server's smoke check ran at 332-376 tok/s with the
 October 10 build, against 324-337 tok/s for the October 9 build.
 
-The trade in the current build is prefill. It is about 15% slower (128K tokens: 8.8 s to 10.1 s), because
-Marlin's W4A16 expert GEMMs run on BF16 tensor cores where the W4A4 path used FP4. Removing
-`QWEN_NVFP4_MARLIN=1` from `serve/run-server.sh` restores the W4A4 experts. Removing
-`QWENFAST_A16MOE=1 QWENFAST_W8M=1 QWENFAST_W8M_PDL=1 QWENFAST_HCCOMB=1` returns decode to the
-October 9 kernels; see the [runtime notes](docs/runtime.md#october-10-changes).
+The October 9 W4A16 precision trade remains relevant to prefill. It is about 15% slower (128K tokens: 8.8 s to 10.1 s), because
+Marlin's W4A16 expert GEMMs run on BF16 tensor cores where the W4A4 path used FP4. The [runtime notes](docs/runtime.md#october-20-kern2) describe the selected switches and fallback paths.
+Do not infer a kern2 32K prefill result from the older precision comparison.
 
-Quality checks for the current build:
-- Agent tool-use bench: 109 and 109 of 120. The October 9 build scored 106 and 108 the same day, on a
-  corrected harness ([why](results/20261010/REPORT.md#quality)).
-- GSM8K: 0.968 (thinking off, all 1,314) and 0.980 (thinking on, 200).
-- Retrieval at 8K, 120K and 240K tokens: pass.
-- Two concurrent 24K and two concurrent 240K requests: pass.
-- Degeneration probe: 0 of 36 degenerate.
-- Decode-path KLD against BF16: 0.011127; the October 9 build scored 0.011134.
+Recorded kern2 quality checks:
+
+- GSM8K chat: 0.96956 with thinking off (1,314), 0.985 with thinking on (200).
+- Paired tool tasks: 88 vs control 83 on 100 usable tasks. Another 20 definition tasks were broken for both;
+  the nominal 88/120 vs 83/120 is not comparable to the older tool scores.
+- Retrieval at 8K, 120K and 240K; two concurrent 24K and 240K requests: pass.
+- Degeneration: 0/36; two-stream aggregate throughput 410.0 tok/s on a separate workload.
+- Vision at the retained 786K pool: 8/8 vs control 7/8.
+- Decode-path KLD and copy probes: **not run for kern2**.
+
+The text-quality checks used the same kernels with an experimental 1M KV pool, which was rejected after
+vision OOM. The installed pool stays at 786,432; the vision checks above used that pool. The
+[October 20 report](results/20261020/REPORT.md) separates those configurations and their limits.
 
 The September releases (SGLang 0.5.20, RadixArk checkpoint, 185.5 tok/s on a sustained
 8,192-token protocol) are documented in [results/20260924](results/20260924/REPORT.md) and
@@ -76,6 +87,7 @@ git clone https://github.com/SSHdotCodes/qwen-3.8-flash-next-pro6000
 cd qwen-3.8-flash-next-pro6000
 ./serve/build-image.sh       # compiles the decode kernels; no GPU needed
 ./serve/download-model.sh    # pinned checkpoint, then the target/draft views
+./serve/prepare-draft-a16.sh # explicit GPU preparation on an idle machine, no server running
 ./serve/run-server.sh        # foreground; http://127.0.0.1:30010
 ```
 
@@ -91,11 +103,18 @@ directories of symlinks next to the snapshot, so no weight file is copied or cha
 - A target view: QSA blocks relabelled for SGLang 0.5.21, the BF16 PLE table kept, the routed-experts-only quantization scope.
 - A draft view: the native MTP weights only.
 
+`prepare-draft-a16.sh` then reads that pinned draft view on the GPU and writes `draft-a16.pt` plus a
+provenance JSON beside the views. It builds NVFP4 expert weights and INT8 shared-expert weights for the
+draft override; no weights are redistributed here. The public conversion uses synthetic validation
+and still needs GPU verification against the measured artifact and full runtime. Its archive bytes may
+differ from the installed reference hash recorded in `serve/runtime.json`.
+
 Environment overrides, used the same way for build, download and serve:
 - `HF_CACHE` (default `$HOME/models/huggingface`)
 - `MODEL_VIEWS` (default `$HOME/models/qwen38-flash-next-redhat`)
 - `RUNTIME_CACHE` (default `$HOME/.cache/sglang-flash-next/0.5.21`)
 - `IMAGE`
+- `DRAFT_A16` (default `$MODEL_VIEWS/<revision>/draft-a16.pt`, used by preparation and serving)
 
 `PORT` and `NAME` are optional launch overrides. `DRY_RUN=1 ./serve/run-server.sh` prints the exact command without
 starting Docker.
@@ -105,7 +124,7 @@ starting Docker.
 100.7. After a restart with the populated cache it measured 240.9 tok/s and 100.7 steps/s, matching the measured
 workstation's 100.8. Restart once after the first start before comparing numbers.
 
-For systemd, clone to `~/qwen-3.8-flash-next-pro6000`, build and download first,
+For systemd, clone to `~/qwen-3.8-flash-next-pro6000`, build, download and prepare the draft artifact first,
 then install the [user unit](serve/qwen38-flash-next-sglang.service):
 
 ```bash
@@ -133,14 +152,14 @@ networking. Use an authenticated proxy before offering inference remotely.
 | PLE / n-gram table | Original BF16, pinned host RAM |
 | KV cache | FP8 E4M3, 786,432 allocated tokens |
 | Context / concurrency | 262,144 per request / maximum two requests |
-| MTP | NEXTN, three steps, top-k 1, four verify tokens; FP8 draft weights |
+| MTP | NEXTN, three steps, top-k 1, four verify tokens; CLI FP8, with routed experts overridden by NVFP4 A16 and INT8 shared experts |
 | Draft proposals | The draft's own top-k / top-p truncation (`QWEN_DRAFT_TRUNC=1`); exact rejection against the full target distribution |
-| Draft vocabulary | 97,800 IDs (incl. all 276 special IDs), INT8 head screened by an INT4 copy |
-| Target vocabulary | Full 248,320 IDs |
+| Draft vocabulary | 97,800 IDs (incl. all 276 special IDs), INT8 head with INT2/INT4 two-stage screening at M=1, INT4 at M=2–8 |
+| Target vocabulary | 248,320 IDs; screened exact W8M candidate logits for eligible top-k requests, dense fallback otherwise |
 | Linear attention | Triton prefill/verification; FlashInfer decode |
-| Recurrent state | BF16, `extra_buffer`, track interval 64, cache size 14 |
+| Recurrent state | BF16 with replay-on-commit, `extra_buffer`, track interval 64, cache size 14 |
 | Other retained settings | PLE CPU offload, page 64, prefill chunk 4,096, graph batch 2 |
-| Decode kernels | `qwenfast` for 1-8-token batches (SM120a): persistent W4A16 MoE, NVFP4 MoE (W4A4 mode), INT8 / exact 12-bit dense GEMMs, fused router, hyper-connections (combine fused into the next mix, `QWENFAST_HCCOMB=1`), GDN output, top-k and sampling. `QWENFAST=0` restores the stock SGLang paths |
+| Decode kernels | `qwenfast` for 1-8-token batches (SM120a): persistent W4A16 MoE, NVFP4 MoE (W4A4 mode), INT8 / exact 12-bit dense GEMMs, fused router, hyper-connections (combine fused into the next mix, `QWENFAST_HCCOMB=1`), GDN replay/output, head screening, top-k and sampling. Use a previous release checkout for a controlled rollback |
 
 The benchmark sends these request fields explicitly:
 
@@ -158,13 +177,14 @@ The benchmark sends these request fields explicitly:
 ```
 
 `--sampling-defaults model` does not force clients to send these settings.
-Draft-side changes (FP8 draft weights, the hot-token head, truncated proposals) change
+Draft-side changes (A16/INT8 draft experts, FP8 draft linears, the hot-token head and truncated proposals) change
 how many draft tokens are accepted, never the output distribution. Exact rejection
 uses the full target distribution, including IDs absent from the draft map. There is
 no relaxed acceptance or draft temperature sharpening. The target-side changes are:
 - W4A16 experts: the same weights with more precise activations.
 - INT8 dense weights: a small measured KLD cost, 0.01756 to 0.01784 with W4A4 experts and 0.01064 to 0.01109 with W4A16 experts.
 - October 10 decode kernels: the same weights and formats in new kernels; decode-path KLD 0.011134 to 0.011127.
+- October 20 target head screen and GDN replay/output: kernel evidence is recorded; decode-path KLD was not re-measured.
 
 Floating-point behaviour and sampled reasoning length still vary.
 
@@ -175,10 +195,15 @@ The [runtime notes](docs/runtime.md) cover:
 - startup loading and the draft hot-token map;
 - the decode kernels and the October changes.
 
-The 13 overlay files, the draft token map and the 17 kernel source files match the workstation's production
-sources, with two exceptions: one config key is renamed and one comment is edited. The image compiles the kernels itself, so the
-library's bytes differ from the workstation build (the build path is embedded). The October 10 image was rebuilt
-and served from this checkout on the measuring workstation ([public build check](results/20261010/REPORT.md#public-build-check)).
+The 27 Python overlay files, unchanged draft token map, and kernel sources/bindings match the installed
+kern2 files byte for byte. `serve/runtime.json` pins 26 compilation units plus the build script, header
+and optional support sources. The image compiles the extension itself, so library bytes may differ
+from the recorded workstation binary. The October 20 public image has **not** been rebuilt or GPU-tested
+as part of packaging; the [release draft](RELEASE_NOTES_DRAFT.md) lists the remaining checks.
+
+The target screen uses a sigma bound tested on 602 captured inputs. Candidate logits were bitwise equal
+and top-k sets matched there; fresh workloads still need an omission audit. Requests with logprobs,
+grammar, penalties, min_p, logit bias or unsupported top-k use the dense fallback.
 
 Kernel checks:
 - The exact 12-bit dense format is unpacked and compared bit for bit at every load.
@@ -200,10 +225,10 @@ On an idle model server, in another shell:
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r bench/requirements.txt
-# October protocol (decode table above):
-python3 bench/decode_bench.py mine --port 30010 --runs 3 --tokens 4096 \
+# October 20 protocol (two runs per profile):
+python3 bench/decode_bench.py mine --port 30010 --runs 2 --tokens 4096 \
   --profiles code,agent,prose,chinese --efforts xhigh --prefill "" --out results/local
-# Step rate from the server log (October 10 statistic; pass a UTC window to restrict it):
+# Step rate from the server log (October 10/20 statistic; pass a UTC window to restrict it):
 docker logs qwen38-flash-next-sglang > results/local/server.log 2>&1
 python3 bench/step_median.py results/local/server.log
 # September protocol:

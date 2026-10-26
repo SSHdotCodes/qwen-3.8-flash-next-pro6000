@@ -1,6 +1,6 @@
 import os, sys, time
 from torch.utils.cpp_extension import load
-SRC = ['qf_bind.cpp', 'qf_smallm.cu', 'qf_hcmix.cu', 'qf_moe.cu', 'qf_hc2.cu', 'qf_router.cu', 'qf_gdnout.cu', 'qf_sample.cu', 'qf_w8.cu', 'qf_pf.cu', 'qf_pk.cu', 'qf_w8g.cu', 'qf_hc8.cu', 'qf_topk.cu', 'qf_w4s.cu', 'qf_a16moe.cu']
+SRC = ['qf_bind.cpp', 'qf_smallm.cu', 'qf_hcmix.cu', 'qf_moe.cu', 'qf_hc2.cu', 'qf_router.cu', 'qf_gdnout.cu', 'qf_sample.cu', 'qf_w8.cu', 'qf_pf.cu', 'qf_pk.cu', 'qf_w8g.cu', 'qf_hc8.cu', 'qf_topk.cu', 'qf_w4s.cu', 'qf_a16moe.cu', 'qf_lead.cu', 'qf_hc_fast.cu', 'qf_hc_g96fast.cu', 'gdn_replay.cu', 'head_run.cpp', 'head_screen.cu', 'head_screen_mma.cu', 'head_rescore.cu', 'qf_drafthead_hier.cu', 'qf_gdnout_new.cu']
 def build(verbose=False):
     d = os.path.dirname(os.path.abspath(__file__))
     bd = os.environ.get("QF_BUILD", d + "/build_qf"); os.makedirs(bd, exist_ok=True)

@@ -601,7 +601,14 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
             forward_batch.req_pool_indices,
         ]
         if self.model_runner.model_config.model_is_mrope:
-            buffers.mrope_positions.zero_()
+            # WP-Spec: the zero fill only matters for columns the copy below does not cover; without padding
+            # the copy covers every column this graph reads, and wider graphs refill their own columns.
+            if not (
+                bs == raw_bs
+                and forward_batch.mrope_positions is not None
+                and forward_batch.mrope_positions.shape == (3, raw_num_token)
+            ):
+                buffers.mrope_positions.zero_()
             if forward_batch.mrope_positions is not None:
                 copy_dsts.append(buffers.mrope_positions[:, :raw_num_token])
                 copy_srcs.append(forward_batch.mrope_positions)
@@ -614,6 +621,27 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
         ):
             copy_dsts.append(buffers.bootstrap_room_ids_int[:raw_bs])
             copy_srcs.append(forward_batch.bootstrap_room_ids_int)
+        # WP-Spec: the per-request sampling parameters join the grouped copy (one launch instead of three
+        # 4-byte memcpys) when their shapes and dtypes match the static buffers exactly.
+        sampling_in_group = False
+        if (
+            get_spec().speculative_use_rejection_sampling
+            and forward_batch.sampling_info is not None
+        ):
+            si = forward_batch.sampling_info
+            extra = [
+                (self.temperatures[:raw_bs], si.temperatures[:raw_bs]),
+                (self.top_ks[:raw_bs], si.top_ks[:raw_bs]),
+                (self.top_ps[:raw_bs], si.top_ps[:raw_bs]),
+            ]
+            if all(
+                d.shape == s.shape and d.dtype == s.dtype and s.device == d.device
+                for d, s in extra
+            ):
+                for d, s in extra:
+                    copy_dsts.append(d)
+                    copy_srcs.append(s)
+                sampling_in_group = True
         _grouped_foreach_copy_(copy_dsts, copy_srcs)
 
         # hidden_states is large + contiguous: copy_() uses the cudaMemcpyAsync
@@ -639,6 +667,7 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
         if (
             get_spec().speculative_use_rejection_sampling
             and forward_batch.sampling_info is not None
+            and not sampling_in_group
         ):
             self.temperatures[:raw_bs].copy_(
                 forward_batch.sampling_info.temperatures[:raw_bs]

@@ -1,10 +1,12 @@
 Qwen3.8-Flash-Next RTX PRO 6000 runtime configuration and measurements
 Copyright 2026 SSHdotCodes contributors
 
-serve/overlays/sglang contains modified SGLang 0.5.20 source, distributed
+serve/overlays/sglang contains modified SGLang 0.5.21 source, distributed
 under Apache-2.0. Upstream: https://github.com/sgl-project/sglang
 Modifications: SM120 QSA/FP8 handling, pending-ring storage and indexing,
-draft vocabulary selection, proposal-probability lifetime, and startup loading.
+draft vocabulary selection, proposal-probability lifetime, startup loading,
+QSA store/packing and graph metadata, speculative bookkeeping, draft A16 loading,
+head screening, and GDN replay/state handling.
 See serve/runtime.json for the immutable base and installed file hashes.
 
 The numeric draft token map derives from the public hot_tokens_64k.pt artifact

@@ -979,6 +979,8 @@ def eagle_sample(
                 _spec_dump(topk_vals, topk_idx, sampling_info, verify_input.draft_probs, candidates, num_correct_drafts)
             del topk_vals, topk_idx, coins, coins_for_final_sampling
         else:
+            from sglang.srt.qwenfast import head_dense_fixup
+            head_dense_fixup(next_token_logits)
             expanded_temperature = torch.repeat_interleave(
                 sampling_info.temperatures, verify_input.draft_token_num, dim=0
             )  # (bs * num_draft_tokens, 1)

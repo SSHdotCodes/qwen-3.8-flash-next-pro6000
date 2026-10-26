@@ -41,7 +41,7 @@ def write_view(source: Path, dest: Path, kind: str) -> None:
     ]
     index = json.loads((source / "model.safetensors.index.json").read_text())
     if kind == "target":
-        config["redhat_streamed_load"] = True
+        config["vega_redhat_streamed_load"] = True
         config["text_config"]["ple_embedding_dtype"] = "bfloat16"
         config["quantization_config"]["ignore"].append(r"re:^(?!.*\.mlp\.experts(?:\.|$)).*$")
     else:

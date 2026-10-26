@@ -474,6 +474,24 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         # Capture draft
         decode_backend = get_exec().graph.cuda_graph_config.decode.backend
         capture_bs, _ = get_batch_sizes_to_capture(self.draft_runner)
+        # WP-Spec: the captured draft graphs stack their draft probabilities into this persistent buffer (outside
+        # the shared graph pool), so draft() no longer has to clone the graph output before the target forward.
+        self._draft_probs_out = (
+            torch.empty(
+                (
+                    max(capture_bs),
+                    self.speculative_num_steps,
+                    self.draft_runner.model_config.vocab_size,
+                ),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            if _SPEC_STACK_OUT
+            and capture_bs
+            and get_spec().speculative_use_rejection_sampling
+            and self.speculative_num_steps > 1
+            else None
+        )
         if self.speculative_num_steps > 1:
             tic = time.perf_counter()
             before_mem = get_available_gpu_memory(self.device, self.gpu_id)
@@ -646,13 +664,25 @@ class EagleDraftWorker(EagleDraftWorkerBase):
                 parent_list, top_scores_index, draft_tokens, draft_probs = (
                     self.cuda_graph_runner.execute(forward_batch)
                 )
-                if draft_probs is not None:
+                out = getattr(self, "_draft_probs_out", None)
+                if draft_probs is not None and (
+                    out is None
+                    or draft_probs.untyped_storage().data_ptr()
+                    != out.untyped_storage().data_ptr()
+                ):
                     # draft_probs is the one graph output read after the target
                     # forward rather than by it, and it points into the graph's
                     # private memory pool. The pool recycles that block in the
                     # meantime -- in practice the DSA top-k mask lands there and
                     # eagle_sample sees -inf. Copy out at the boundary.
+                    # (WP-Spec: not needed when the graph stacked into _draft_probs_out.)
                     draft_probs = draft_probs.clone()
+                elif draft_probs is not None:
+                    from sglang.srt.speculative import spec_fused as _sf
+
+                    if _sf.CHECK:
+                        # the target forward must leave the stacked buffer untouched until eagle_sample has read it
+                        self._stack_check_ref = (draft_probs, draft_probs.clone())
             else:
                 if (
                     not forward_batch.forward_mode.is_idle()
@@ -837,11 +867,28 @@ class EagleDraftWorker(EagleDraftWorkerBase):
                     topk_index = self.hot_token_id[topk_index]
                 hidden_states = logits_output.hidden_states
 
-        draft_probs = (
-            torch.stack(draft_probs_list, dim=1)
-            if get_spec().speculative_use_rejection_sampling
-            else None
-        )
+        draft_probs = None
+        if get_spec().speculative_use_rejection_sampling:
+            out = getattr(self, "_draft_probs_out", None)
+            first = draft_probs_list[0]
+            if (
+                out is not None
+                and torch.cuda.is_current_stream_capturing()
+                and first.dim() == 2
+                and first.shape[0] <= out.shape[0]
+                and len(draft_probs_list) == out.shape[1]
+                and all(
+                    p.shape == (first.shape[0], out.shape[2])
+                    and p.dtype == out.dtype
+                    and p.device == out.device
+                    for p in draft_probs_list
+                )
+            ):
+                draft_probs = torch.stack(
+                    draft_probs_list, dim=1, out=out[: first.shape[0]]
+                )
+            else:
+                draft_probs = torch.stack(draft_probs_list, dim=1)
 
         # Organize the results
         if draft_tokens_topk1 is not None:
@@ -1051,30 +1098,62 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         self, batch: ScheduleBatch, batch_result: GenerationBatchResult
     ):
         # Batch 2: Draft extend
+        # WP-Spec: accept_lens - 1, select_index and next_token_ids.to(int64) in one launch.
+        from sglang.srt.speculative.spec_fused import draft_extend_prep
+
+        fused = (
+            draft_extend_prep(
+                batch_result.accept_lens,
+                batch_result.next_token_ids,
+                self.speculative_num_draft_tokens,
+            )
+            if batch_result.accept_lens.shape[0] == len(batch.seq_lens)
+            else None
+        )
         draft_extend_input = EagleDraftExtendInput(
             hidden_states=batch_result.logits_output.hidden_states,
             # accept_lens includes the bonus token; correct drafts exclude it.
-            num_correct_drafts=batch_result.accept_lens - 1,
+            num_correct_drafts=(
+                fused[0] if fused is not None else batch_result.accept_lens - 1
+            ),
             num_accept_tokens=batch_result.accept_lens,
             # Draft-extend fills the whole tree width (num_draft_tokens) per req,
             # not num_steps + 1, so DP MLP-sync padding stays consistent for topk > 1.
             num_tokens_per_req=self.speculative_num_draft_tokens,
             num_tokens_for_logprob_per_req=self.speculative_num_draft_tokens,
         )
-        select_index = (
-            torch.arange(
-                0,
-                len(batch.seq_lens) * self.speculative_num_draft_tokens,
-                self.speculative_num_draft_tokens,
-                device=self.device,
-            )
-            + batch_result.accept_lens
-            - 1
-        )
+        if fused is not None:
+            select_index, next_token_ids = fused[1], fused[2]
+            from sglang.srt.speculative import spec_fused as _sf
 
-        # Cast to int64 before entering plan stream to avoid cross-stream
-        # synchronization issues with .to() inside the plan stream context.
-        next_token_ids = batch_result.next_token_ids.to(torch.int64)
+            if _sf.CHECK:
+                n = self.speculative_num_draft_tokens
+                ref_sel = (
+                    torch.arange(0, len(batch.seq_lens) * n, n, device=self.device)
+                    + batch_result.accept_lens
+                    - 1
+                )
+                _sf.check(
+                    "draft_extend_prep",
+                    _sf.same(fused[0], batch_result.accept_lens - 1)
+                    and _sf.same(select_index, ref_sel)
+                    and _sf.same(next_token_ids, batch_result.next_token_ids.to(torch.int64)),
+                )
+        else:
+            select_index = (
+                torch.arange(
+                    0,
+                    len(batch.seq_lens) * self.speculative_num_draft_tokens,
+                    self.speculative_num_draft_tokens,
+                    device=self.device,
+                )
+                + batch_result.accept_lens
+                - 1
+            )
+
+            # Cast to int64 before entering plan stream to avoid cross-stream
+            # synchronization issues with .to() inside the plan stream context.
+            next_token_ids = batch_result.next_token_ids.to(torch.int64)
 
         # Prepare for draft extend in a separate stream
         with self.plan_stream_ctx:
@@ -1893,6 +1972,37 @@ class EAGLEWorkerV2(BaseSpecWorker):
             dw._rebuild_topk1_chain_buffers()
 
     def verify(self, batch: ScheduleBatch, pp_proxy_tensors=None, grammar_barrier=None):
+        from sglang.srt import qwenfast as _qfh
+        _qfh.head_screen_begin(batch)
+        try:
+            return self._verify_inner(batch, pp_proxy_tensors, grammar_barrier)
+        finally:
+            _qfh.head_screen_end()
+
+    def _verify_inner(self, batch: ScheduleBatch, pp_proxy_tensors=None, grammar_barrier=None):
+        ref = getattr(self.draft_worker, "_stack_check_ref", None)
+        if ref is not None:
+            # WP-Spec QWEN_SPEC_CHECK: the target forward must leave the persistent draft-prob stack untouched
+            from sglang.srt.speculative import spec_fused as _sf
+
+            self.draft_worker._stack_check_ref = None
+            out = run_eagle_verify(
+                batch,
+                pp_proxy_tensors=pp_proxy_tensors,
+                target_worker=self.target_worker,
+                req_to_token_pool=self.req_to_token_pool,
+                token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+                plan_stream=self.plan_stream,
+                plan_stream_ctx=self.plan_stream_ctx,
+                topk=self.topk,
+                num_draft_tokens=self.speculative_num_draft_tokens,
+                device=self.device,
+                metadata_ready_pre_pad=False,
+                finalize_tree_path=True,
+                grammar_barrier=grammar_barrier,
+            )
+            _sf.check("draft_probs_stack_out", _sf.same(ref[0], ref[1]))
+            return out
         return run_eagle_verify(
             batch,
             pp_proxy_tensors=pp_proxy_tensors,
@@ -1911,6 +2021,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
 
 
 _DRAFT_TRUNC = os.environ.get("QWEN_DRAFT_TRUNC", "0") == "1"
+_SPEC_STACK_OUT = os.environ.get("QWEN_SPEC_STACK_OUT", "1") == "1"
 _DRAFT_TRUNC_K = int(os.environ.get("QWEN_DRAFT_TRUNC_K", "64"))
 
 
@@ -1944,8 +2055,17 @@ def _truncated_from_logits(logits: torch.Tensor, temperatures: torch.Tensor, top
     logits (softmax over them), so the full-vocabulary softmax is skipped. Top-K by qwenfast's two-stage
     radix select (~12 us per call vs ~50 us for torch.topk on a 248K row)."""
     K = _DRAFT_TRUNC_K
-    from sglang.srt.qwenfast import ext
+    from sglang.srt.qwenfast import draft_cand_take, ext
 
+    cand = draft_cand_take(logits)
+    if (cand is not None and K == cand[0].shape[1] and temperatures.dtype == torch.float32
+            and logits.dim() == 2 and cand[0].shape[0] == logits.shape[0]):
+        exact, cidx, hot_ids = cand
+        expo = torch.empty_like(exact).exponential_(1.0)
+        q = torch.zeros((logits.shape[0], logits.shape[1]), dtype=torch.float32, device=logits.device)
+        topk_p, topk_index = ext().cand_trunc_sample(exact, cidx, hot_ids, temperatures.reshape(-1).contiguous(),
+                                                     top_ks.contiguous(), top_ps.float().contiguous(), expo, q)
+        return q, topk_p, topk_index
     if (logits.dim() == 2 and logits.stride(1) == 1 and logits.dtype in (torch.float32, torch.bfloat16)
             and logits.shape[1] >= 64 * K and hasattr(ext(), "topk_rows")):
         vals, idx = ext().topk_rows(logits, K)

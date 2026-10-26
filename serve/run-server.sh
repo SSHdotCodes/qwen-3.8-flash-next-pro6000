@@ -2,11 +2,11 @@
 # Validated recommended-sampling profile: full 262K context, two slots, RedHatAI NVFP4 routed
 # experts run as W4A16 (Marlin for prefill, a persistent decode kernel for 1-8 tokens), BF16 dense
 # weights stored exactly or as group-scaled INT8, FP8 E4M3 KV, exact rejection sampling,
-# draft-only hot map.
+# draft hot map, screened target head and GDN replay.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export DOCKER_HOST="${DOCKER_HOST:-unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock}"
-IMAGE="${IMAGE:-local/qwen-flash-next:0.5.21-20261010-kern}"
+IMAGE="${IMAGE:-local/qwen-flash-next:0.5.21-20261020-kern2}"
 NAME="${NAME:-qwen38-flash-next-sglang}"
 PORT="${PORT:-30010}"
 HF_CACHE="${HF_CACHE:-$HOME/models/huggingface}"
@@ -14,6 +14,7 @@ RUNTIME_CACHE="${RUNTIME_CACHE:-$HOME/.cache/sglang-flash-next/0.5.21}"
 MODEL_VIEWS="${MODEL_VIEWS:-$HOME/models/qwen38-flash-next-redhat}"
 REVISION="c8f2fb1b9869f686b214782036123b10ff96d14a"
 VIEW="$MODEL_VIEWS/$REVISION"
+DRAFT_A16="${DRAFT_A16:-$VIEW/draft-a16.pt}"
 if ! [[ "$PORT" =~ ^[1-9][0-9]{0,4}$ ]] || (( PORT > 65535 )); then
   echo 'PORT must be an integer from 1 to 65535' >&2; exit 1
 fi
@@ -29,6 +30,11 @@ command=(docker run --rm --pull never --name "$NAME"
   -e QWENFAST_ROUTER=1 -e QWENFAST_PK=1 -e QWENFAST_W8=inproj,qkv,oproj,head,shared,outproj,hc
   -e QWEN_NVFP4_MARLIN=1
   -e QWENFAST_A16MOE=1 -e QWENFAST_W8M=1 -e QWENFAST_W8M_PDL=1 -e QWENFAST_HCCOMB=1
+  -e QWEN_MTP_A16=/opt/qwen-draft-a16.pt
+  -e QWENFAST_HC_WP=1 -e QWENFAST_ATTN=1 -e QWENFAST_HEAD_SCREEN=1
+  -e QWEN_MTP_HOT_SCREEN2=1 -e QWENFAST_GDNOUT_WP=1
+  -e QWENFAST_GDNOUT_VARIANT=replay -e QWENFAST_GDN_REPLAY=1
+  -v "$DRAFT_A16:/opt/qwen-draft-a16.pt:ro"
   -v "$HF_CACHE:/root/.cache/huggingface"
   -v "$HF_CACHE:$HF_CACHE:ro"
   -v "$VIEW:/opt/redhat-model:ro"
@@ -62,6 +68,9 @@ if [[ "$IMAGE_SHA" != "$MANIFEST_SHA" ]]; then
 fi
 if [[ ! -f "$VIEW/target/config.json" || ! -f "$VIEW/draft/config.json" ]]; then
   echo 'Model views missing. Run ./serve/download-model.sh first.' >&2; exit 1
+fi
+if [[ ! -f "$DRAFT_A16" ]]; then
+  echo 'Draft A16 artifact missing. Run ./serve/prepare-draft-a16.sh first.' >&2; exit 1
 fi
 mkdir -p "$RUNTIME_CACHE/triton" "$RUNTIME_CACHE/sglang" "$RUNTIME_CACHE/tilelang"
 # Container networking is isolated. Only the HTTP port is published, to loopback.

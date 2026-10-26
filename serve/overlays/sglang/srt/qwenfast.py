@@ -35,11 +35,22 @@ ROUTER_ENABLED = ENABLED and os.environ.get("QWENFAST_ROUTER", "0") == "1"
 GDN_ENABLED = ENABLED and os.environ.get("QWENFAST_GDN", "1") == "1"
 GDN_MAXT = int(os.environ.get("QWENFAST_GDN_MAXT", "4"))
 SAMPLE_ENABLED = ENABLED and os.environ.get("QWENFAST_SAMPLE", "1") == "1"
+CANDSAMPLE_ENABLED = ENABLED and os.environ.get("QWENFAST_CANDSAMPLE", "1") == "1"
+EXTCAND_ENABLED = CANDSAMPLE_ENABLED and os.environ.get("QWENFAST_EXTCAND", "1") == "1"   # also for the draft-extend graph
+# WP-Head: screened exact target lm_head in the verify graph (4-bit high-nibble screen, per-row sigma bound, exact
+# W8M rescoring of the candidates, -inf elsewhere); a device flag set per verify replay selects the full dense head
+HEAD_SCREEN_ENABLED = ENABLED and os.environ.get("QWENFAST_HEAD_SCREEN", "0") == "1"
+HEAD_SCREEN_Z = float(os.environ.get("QWENFAST_HEAD_Z", "8"))
+HEAD_SCREEN_CAP = int(os.environ.get("QWENFAST_HEAD_CAP", "4096"))
+_HEAD = {}
 A16MOE_ENABLED = ENABLED and os.environ.get("QWENFAST_A16MOE", "0") == "1"
 # Decode: a block's hyper-connection combine runs inside the next mix kernel (hc_combine_mix_w8), within a layer
 # (attention combine -> MLP mix) and across layers (MLP combine -> next attention mix, when no PLE sits between)
 HCCOMB_ENABLED = ENABLED and os.environ.get("QWENFAST_HCCOMB", "0") == "1"
 QSAMETA_ENABLED = ENABLED and os.environ.get("QWENFAST_QSAMETA", "1") == "1"
+# WP-HC kernels (same signatures and math, bitwise identical): QWENFAST_HC_WP=1; variant QWENFAST_HC_WP_VARIANT
+# (g96fast: 96-CTA schedule for <= 4 rows, the token-parallel "fast" kernel above that)
+HC_WP_VARIANT = os.environ.get("QWENFAST_HC_WP_VARIANT", "g96fast") if os.environ.get("QWENFAST_HC_WP", "0") == "1" else None
 # Exact 12-bit packing of selected BF16 target weights (bit-identical weights, 75% of the bytes): GDN in_proj,
 # attention qkv + o_proj and the target lm_head. Decode/verify rows (<= 8) use pk_gemm; larger calls unpack to BF16.
 PK_ENABLED = ENABLED and os.environ.get("QWENFAST_PK", "0") == "1"
@@ -352,6 +363,15 @@ def w8_linear(entry, x: torch.Tensor, bias=None):
 def _w8_lm_head(p, h: torch.Tensor):
     N, K = p["shape"]
     M = h.shape[0]
+    if ("head_hi" in p and _HEAD and 1 <= M <= 8 and h.dtype == torch.bfloat16 and h.is_contiguous()
+            and h.data_ptr() % 16 == 0 and not torch.compiler.is_compiling()):
+        if torch.cuda.is_current_stream_capturing():
+            _HEAD.setdefault("h_graph", {})[M] = h     # static input buffer of the captured verify graph for M rows
+        else:
+            _HEAD["h"] = h
+        out = ext().head_run(h, p["q"], p["s"], p["head_hi"], _HEAD["k"], _HEAD["dense"], HEAD_SCREEN_Z,
+                             HEAD_SCREEN_CAP, 4 if M > 4 else 2)
+        return out[0]
     if 1 <= M <= 8 and h.dtype == torch.bfloat16 and h.is_contiguous() and h.data_ptr() % 16 == 0:
         return ext().w8g_gemm(h, p["q"], p["s"], _w8_rpw(M, K))
     out = torch.empty((M, N), dtype=h.dtype, device=h.device)
@@ -406,6 +426,7 @@ def w8_model(model):
                 ext().w8g_unpack(pd["q"], pd["s"], wd.data)
                 ext().w8g_unpack(pu["q"], pu["s"], wu.data)
                 mod._qf_w8hc = (pd["q"], pd["s"], pu["q"], pu["s"])
+                mod._qf_hc_mlp = name.endswith("mlp_hyper_connection")   # mix feeding the MoE router (HC kernel choice)
                 before += (wd.numel() + wu.numel()) * 2
                 after += pd["q"].numel() + pu["q"].numel() + 2 * (pd["s"].numel() + pu["s"].numel())
                 n += 1
@@ -428,6 +449,14 @@ def w8_model(model):
         seen[cat] = seen.get(cat, 0) + 1
         if is_head:
             mod._qf_pk = p
+            if HEAD_SCREEN_ENABLED and tuple(p["shape"]) == (248320, 2560) and hasattr(ext(), "head_run"):
+                p["head_hi"] = ext().head_pack_hi(p["q"])
+                if hasattr(ext(), "head_set_carveout"):
+                    ext().head_set_carveout(int(os.environ.get("QWENFAST_HEAD_CARVEOUT", "25")))
+                _HEAD_P[:] = [p]
+                _HEAD.update(dense=torch.ones(1, dtype=torch.int32, device=w.device),
+                             k=torch.full((1,), 64, dtype=torch.int32, device=w.device), k_host=64, active=False, h=None)
+                logger.info("qwenfast: screened target head prepared (z=%s, cap=%d)", HEAD_SCREEN_Z, HEAD_SCREEN_CAP)
         _pk_placeholder(w, (p, 0, w.shape[0]))
     torch.cuda.empty_cache()
     logger.info("qwenfast w8g: %d matrices %s, %.2f GB -> %.2f GB, %.1f s", n, seen, before / 1e9, after / 1e9,
@@ -570,6 +599,8 @@ def _install_pk():
                 _install_hc_comb(model)
             if PK_ENABLED:
                 pk_model(model)
+        elif type(model).__name__ == "Qwen4ExpForCausalLMMTP" and os.environ.get("QWEN_MTP_A16"):
+            draft_a16_install(model, os.environ["QWEN_MTP_A16"])
 
     ld.DefaultModelLoader.postprocess_weights = staticmethod(postprocess_weights)
     logger.info("qwenfast pk12: target weight packing hook installed (shapes %s, lm_head %s)", sorted(PK_SHAPES), PK_LM_HEAD)
@@ -800,6 +831,20 @@ def sparse_verify_topk(batch, sampling_info, verify_input, logits):
         return None
 
 
+def _hc_fn(name, rows, mod=None):
+    """WP-HC kernel for one mix call. g96fast (96 CTAs) wins in front of the INT8 GEMMs (attention-side mixes, final
+    mixer) but its shared-memory footprint hurts the router's PDL overlap, so MLP-side mixes and > 4 rows use fast."""
+    e = ext()
+    if HC_WP_VARIANT:
+        v = HC_WP_VARIANT
+        if v == "g96fast" and (rows > 4 or getattr(mod, "_qf_hc_mlp", False)):
+            v = "fast"
+        f = getattr(e, name + "_" + v, None) or getattr(e, name + "_fast", None)
+        if f is not None:
+            return f
+    return getattr(e, name)
+
+
 # Scratch for hc_mix_fused (normed rows, down-projection partials, grid-barrier counters), one set per
 # (device, stream): calls on one stream are ordered, so every layer can share it.
 _hc_scratch = {}
@@ -868,7 +913,7 @@ def _install_hc():
         normed, partial, bar = _hc_bufs(hyper_input.device)
         w8 = getattr(self, "_qf_w8hc", None)
         if w8 is not None:
-            out, inj = ext().hc_mix_fused_w8(
+            out, inj = _hc_fn("hc_mix_fused_w8", hyper_input.shape[0], self)(
                 hyper_input, self.hc_norm.weight, w8[0], w8[1], winj, w8[2], w8[3],
                 self.hc_norm.variance_epsilon, normed, partial, bar, True,
             )
@@ -930,7 +975,7 @@ def _hc_comb_mix(mix_mod, block_output, residuals):
     winj = mix_mod.block_inject_weight.weight if hasattr(mix_mod, "block_inject_weight") else None
     normed, partial, bar = _hc_bufs(block_output.device)
     w8 = mix_mod._qf_w8hc
-    out, inj, xo = ext().hc_combine_mix_w8(
+    out, inj, xo = _hc_fn("hc_combine_mix_w8", block_output.shape[0], mix_mod)(
         block_output, hyper_input, second, mix_mod.hc_norm.weight, w8[0], w8[1], winj, w8[2], w8[3],
         mix_mod.hc_norm.variance_epsilon, normed, partial, bar, True)
     return out, (xo, inj)
@@ -1014,15 +1059,21 @@ def _a16_bufs(device):
     return b
 
 
+def _a16_weights(block):
+    """(w13, s13, g13, w2, s2, g2) of a block's routed experts in the Marlin NVFP4 layout: the experts' own parameters
+    (target, QWEN_NVFP4_MARLIN loader), or a decode-only copy attached as experts._qf_a16 (the MTP draft, whose own
+    FP8 experts stay for prefill-size calls)."""
+    ex = block.experts
+    o = getattr(ex, "_qf_a16", None)
+    if o is not None:
+        return o
+    return tuple(getattr(ex, n, None) for n in ("w13_weight", "w13_weight_scale", "w13_weight_scale_2",
+                                                "w2_weight", "w2_weight_scale", "w2_weight_scale_2"))
+
+
 def _a16_ok(block, x):
     """Decode routed experts on the Marlin-packed NVFP4 weights (QWEN_NVFP4_MARLIN loader) + shared-expert gate."""
-    ex = block.experts
-    w13 = getattr(ex, "w13_weight", None)
-    s13 = getattr(ex, "w13_weight_scale", None)
-    w2 = getattr(ex, "w2_weight", None)
-    s2 = getattr(ex, "w2_weight_scale", None)
-    g13 = getattr(ex, "w13_weight_scale_2", None)
-    g2 = getattr(ex, "w2_weight_scale_2", None)
+    w13, s13, g13, w2, s2, g2 = _a16_weights(block)
     sg = getattr(block, "shared_expert_gate", None)
     return (
         x.dim() == 2 and 1 <= x.shape[0] <= 8 and x.shape[1] == 2560 and x.dtype == torch.bfloat16 and x.is_contiguous()
@@ -1134,7 +1185,7 @@ def _install_router():
         if use_a16:
             # routed experts + sigmoid(x . w_gate) * shared in one persistent kernel; the shared expert (side
             # stream) must be complete before it starts, and the caller then skips its gate-add (shared None).
-            ex = self.experts
+            w13, s13, g13, w2, s2, g2 = _a16_weights(self)
             b = _a16_bufs(hidden_states.device)
             if sh8 is None:
                 cur.wait_stream(self.alt_stream)
@@ -1144,8 +1195,7 @@ def _install_router():
             out = torch.empty_like(hidden_states)
             ext().a16_moe_decode(
                 hidden_states, topk_ids.to(torch.int32).contiguous(), topk_w.to(torch.float32).contiguous(),
-                ex.w13_weight, ex.w13_weight_scale, ex.w13_weight_scale_2.view(-1),
-                ex.w2_weight, ex.w2_weight_scale, ex.w2_weight_scale_2.view(-1),
+                w13, s13, g13.view(-1), w2, s2, g2.view(-1),
                 self.shared_expert_gate.weight.view(-1), shared_arg,
                 b["hbuf"], b["ybuf"], b["gl"], b["ctrl"], out, 4, b["dbg"], b["pbuf"], *sh8, b["shbuf"])
             return out, None
@@ -1162,6 +1212,27 @@ def _install_router():
 # the placeholder runs gated-norm + GEMM in one kernel. Any other consumer path materializes the real norm.
 _gdn_state = {"gdn": None, "pending": {}, "norm_forward": None}
 
+# WP-GDNout: same fused gated-norm + INT8 out_proj, with the norm computed once (not once per CTA), bounded projection
+# batches (64 regs, 4 KB smem at M=4) and an early dependent release. Bitwise equal to gdn_norm_oproj_w8 (same w8g
+# weights, BF16 rounding points, eight K partials, MMA/reduction order). VARIANT tunes it for the recurrence in front:
+# stream = the stock fused recurrence (M=1 keeps the original kernel), replay = the WP-GDN replay-on-commit recurrence.
+GDNOUT_WP_ENABLED = ENABLED and os.environ.get("QWENFAST_GDNOUT_WP", "0") == "1"
+GDNOUT_VARIANT = {"stream": 0, "replay": 1}.get(os.environ.get("QWENFAST_GDNOUT_VARIANT", "stream"))
+
+
+def _gdnout_w8(core, z, wn, eps, swish, q, sc):
+    x = ext()
+    if (GDNOUT_WP_ENABLED and GDNOUT_VARIANT is not None and hasattr(x, "wpgdnout_w8")
+            and core.dtype == torch.bfloat16 and core.ndim == 2 and core.shape[1] == 128 and core.is_contiguous()
+            and core.shape[0] % 48 == 0 and 1 <= core.shape[0] // 48 <= 8
+            and not (GDNOUT_VARIANT == 0 and core.shape[0] == 48)
+            and z.dtype == core.dtype and z.shape == core.shape and z.is_contiguous()
+            and wn.dtype == core.dtype and wn.numel() == 128 and wn.is_contiguous()
+            and q.dtype == torch.int8 and q.shape == (2560, 6144) and q.is_contiguous()
+            and sc.dtype == torch.bfloat16 and sc.shape == (2560, 48) and sc.is_contiguous()):
+        return x.wpgdnout_w8(core, z, wn, eps, swish, q, sc, GDNOUT_VARIANT)
+    return x.gdn_norm_oproj_w8(core, z, wn, eps, swish, q, sc, True, True)
+
 
 def _gdn_out_proj(layer, x, bias):
     g = _gdn_state["gdn"]
@@ -1177,8 +1248,7 @@ def _gdn_out_proj(layer, x, bias):
         p = entry[0]
         if (p.get("kind") == "w8" and bias is None and x.dim() == 2 and x.shape == (core.shape[0] // 48, 6144)
                 and p["shape"] == (2560, 6144) and entry[1] == 0 and entry[2] == 2560):
-            return ext().gdn_norm_oproj_w8(core, z, norm.weight, norm.eps, norm.activation != "sigmoid", p["q"], p["s"],
-                                           True, True)
+            return _gdnout_w8(core, z, norm.weight, norm.eps, norm.activation != "sigmoid", p["q"], p["s"])
         placeholder.copy_(_gdn_state["norm_forward"](norm, core, z))
         return None
     if (
@@ -1276,6 +1346,173 @@ def _install_qsa_meta():
     gm._qsa_graph_row_metadata_kernel = RowMetadataLauncher()
     logger.info("qwenfast: QSA graph row-metadata launch override installed")
 
+
+
+
+def draft_a16_install(model, path):
+    """MTP draft MoE on NVFP4 copies of its experts (draft/convert.py output), made at load time so the KV pool is
+    sized after the draft's FP8 experts are freed: <= 8-row calls run the persistent a16 kernel (dual()), larger
+    calls (draft prefill) SGLang's Marlin MoE on the same NVFP4 weights. Draft precision only changes acceptance."""
+    from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import fused_marlin_moe
+    from sglang.srt.layers.quantization.marlin_utils import marlin_make_workspace
+    d = torch.load(path, map_location="cuda")
+    blocks = [m for m in model.modules() if hasattr(m, "experts") and hasattr(m, "shared_expert_gate")]
+    freed = 0
+    for b in blocks:
+        ex = b.experts
+        w = (d["w13"], d["s13"], d["g13"], d["w2"], d["s2"], d["g2"])
+        ex._qf_a16 = w
+        b._qf_a16sh = (d["sq1"], d["ss1"], d["sq2"], d["ss2"])
+        ws = marlin_make_workspace(d["w13"].device, 4)
+        n_exp = d["w13"].shape[0]
+
+        def forward(hidden_states, topk_output, *args, _w=w, _ws=ws, _n=n_exp, **kwargs):
+            return fused_marlin_moe(hidden_states=hidden_states, w1=_w[0], w2=_w[3], w1_scale=_w[1], w2_scale=_w[4],
+                                    gating_output=topk_output.router_logits, topk_weights=topk_output.topk_weights,
+                                    topk_ids=topk_output.topk_ids, global_num_experts=_n, w1_global_scale=_w[2],
+                                    w2_global_scale=_w[5], workspace=_ws, num_bits=4, is_k_full=True, inplace=False)
+
+        ex.forward = forward
+        for name in ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale", "w13_weight_scale_inv",
+                     "w2_weight_scale_inv", "w13_input_scale", "w2_input_scale"):
+            t = getattr(ex, name, None)
+            if isinstance(t, torch.Tensor) and t.numel() > 1:
+                freed += t.numel() * t.element_size()
+                setattr(ex, name, torch.nn.Parameter(torch.empty(0, dtype=t.dtype, device=t.device), requires_grad=False))
+    del d
+    torch.cuda.empty_cache()
+    logger.info("Draft a16 MoE at load: NVFP4 experts + INT8 shared expert for %d blocks, Marlin for prefill-size calls, "
+                "%.2f GB of draft FP8 experts freed", len(blocks), freed / 1e9)
+
+# Draft hot-head screening candidates (qwen4_exp_mtp ShortlistDraftLogitsProcessor) handed to the truncated draft
+# proposal (eagle_worker_v2._truncated_from_logits), so it skips the top-K over the full-vocabulary logits tensor the
+# candidates were scattered into. Single slot: every draft head call clears it, a screened call fills it, the next
+# proposal consumes it if the shape matches (the logits processor copies logits into its own buffer, so storage differs).
+_draft_cand = {}
+# The draft-extend graph samples outside its graph, after replay, where no Python of the captured forward runs.
+# A registration made while capturing points at the graph's static buffers; the runner keeps it per graph and restores
+# it after each replay (draft_cand_captured / draft_cand_restore), when those buffers hold this replay's candidates.
+_draft_cand_cap = {}
+
+
+def draft_cand_clear():
+    _draft_cand.clear()
+
+
+def draft_cand_register(logits, exact, cidx, hot_ids):
+    _draft_cand.clear()
+    if CANDSAMPLE_ENABLED and hasattr(ext(), "cand_trunc_sample"):
+        _draft_cand["e"] = (tuple(logits.shape), exact, cidx, hot_ids)
+        if torch.cuda.is_current_stream_capturing():
+            _draft_cand_cap["e"] = _draft_cand["e"]
+
+
+def draft_cand_take(logits):
+    e = _draft_cand.pop("e", None)
+    if e is None or e[0] != tuple(logits.shape):
+        return None
+    return e[1:]
+
+
+# WP-DraftHead: M=1 hot-head screen in two stages. A packed INT2 g64 screen over every hot row, a histogram threshold
+# keeping a superset of its top-C, then the production INT4 arithmetic on the survivors only -> top-64 ids. The INT8
+# row-dot / scatter / sampler after it are unchanged; a missed INT4 top-64 member could only change which proposal q the
+# draft samples from (rejection sampling stays exact), never the target distribution. M=2..8 keep the INT4 screen.
+DRAFTHEAD2_ENABLED = ENABLED and os.environ.get("QWEN_MTP_HOT_SCREEN2", "0") == "1"
+DRAFTHEAD2_C = int(os.environ.get("QWEN_MTP_HOT_SCREEN2_C", "4608"))
+
+
+@torch.no_grad()
+def drafthead_make_q2(hot):
+    """Packed INT2 copy of the BF16 hot rows: code b is (2*b-3)*s, s = BF16(RMS(group of 64)/2), four codes per byte
+    little endian. Chunked to bound load-time memory. (None, None) when disabled or unsupported."""
+    if not (DRAFTHEAD2_ENABLED and hot.is_cuda and hot.dtype == torch.bfloat16 and hot.ndim == 2
+            and hot.shape[1] == 2560 and 64 <= hot.shape[0] <= 131072):
+        return None, None
+    n = hot.shape[0]
+    q2 = torch.empty((n, 640), dtype=torch.uint8, device=hot.device)
+    s2 = torch.empty((n, 40), dtype=torch.bfloat16, device=hot.device)
+    for lo in range(0, n, 4096):
+        hi = min(n, lo + 4096)
+        xg = hot[lo:hi].float().view(-1, 40, 64)
+        s = (xg.square().mean(2).sqrt().clamp_min_(1e-30) / 2).to(torch.bfloat16)
+        codes = (xg / (2 * s.float().unsqueeze(-1))).floor_().clamp_(-2, 1).add_(2).to(torch.uint8).view(-1, 2560)
+        q2[lo:hi] = codes[:, 0::4] | (codes[:, 1::4] << 2) | (codes[:, 2::4] << 4) | (codes[:, 3::4] << 6)
+        s2[lo:hi] = s
+    logger.info("Draft hot head two-stage screen: INT2 copy %s, C=%d", tuple(q2.shape), DRAFTHEAD2_C)
+    return q2, s2
+
+
+def drafthead_candidates(h, q4, s4, q2=None, s2=None):
+    """(INT4 values, ids) of the top-64 hot rows: two-stage at M=1, the production INT4 screen otherwise."""
+    x = ext()
+    if (DRAFTHEAD2_ENABLED and q2 is not None and s2 is not None and h.dtype == torch.bfloat16 and h.ndim == 2
+            and h.shape[0] == 1 and h.shape[1] == 2560 and h.stride(1) == 1
+            and 64 <= DRAFTHEAD2_C <= q4.shape[0] and hasattr(x, "drafthead_screen")):
+        return x.drafthead_screen(h, q2, s2, q4, s4, DRAFTHEAD2_C)
+    m = h.shape[0]
+    # the w4g kernel dispatches M=5..7 to its M=8 instance: pad so it reads only real rows
+    hp = torch.cat((h, h[:1].expand(8 - m, -1))) if 5 <= m <= 7 else h
+    return x.topk_rows(x.w4g_gemm(hp, q4, s4)[:m], 64)
+
+
+def draft_cand_captured():
+    """The registration made by the graph capture that just ran (static graph buffers), or None. Clears it."""
+    return _draft_cand_cap.pop("e", None)
+
+
+def draft_cand_restore(entry):
+    """After replaying a graph whose capture registered `entry`; the next draft_cand_take still checks the shape."""
+    _draft_cand.clear()
+    if entry is not None and EXTCAND_ENABLED:
+        _draft_cand["e"] = entry
+
+
+def head_screen_begin(batch):
+    """Before a target-verify forward: let the head run screened (device flag 0) when every request is sampled by the
+    sparse verify sampler (top_k 1..56, no logprobs/grammar/penalties/logit bias/min_p); k = its candidate count."""
+    if not _HEAD:
+        return
+    ok, k = False, 64
+    try:
+        reqs = getattr(batch, "reqs", None)
+        si = getattr(batch, "sampling_info", None)
+        if reqs and si is not None and not getattr(batch, "has_grammar", False) and si.need_top_k_sampling \
+                and not si.need_min_p_sampling and si.logit_bias is None \
+                and not (si.penalizer_orchestrator is not None and si.penalizer_orchestrator.is_required) \
+                and not getattr(batch, "return_logprob", False) and not any(getattr(r, "return_logprob", False) for r in reqs):
+            tks = [int(r.sampling_params.top_k) for r in reqs]
+            if min(tks) >= 1 and max(tks) <= 56:
+                ok, k = True, min(64, max(tks) + 8)
+    except Exception:
+        ok = False
+    if ok:
+        if _HEAD["k_host"] != k:
+            _HEAD["k"].fill_(k)
+            _HEAD["k_host"] = k
+        _HEAD["dense"].fill_(0)
+        _HEAD["active"] = True
+
+
+def head_screen_end():
+    if _HEAD and _HEAD["active"]:
+        _HEAD["dense"].fill_(1)
+        _HEAD["active"] = False
+
+
+def head_dense_fixup(logits):
+    """The sampler is about to read every logit (dense path) of a screened verify: recompute them exactly."""
+    if not (_HEAD and _HEAD["active"]):
+        return
+    h = _HEAD.get("h_graph", {}).get(logits.shape[0] if logits.dim() == 2 else -1, _HEAD.get("h"))
+    p = _HEAD_P[0] if _HEAD_P else None
+    if p is None or logits.dim() != 2 or logits.shape[0] != h.shape[0]:
+        raise RuntimeError("qwenfast: screened head without dense fixup state")
+    logger.warning("qwenfast: screened verify head declined by the sampler; recomputing dense logits")
+    logits.copy_(ext().w8g_gemm(h, p["q"], p["s"], _w8_rpw(h.shape[0], 2560)).to(logits.dtype))
+
+
+_HEAD_P = []
 
 if ENABLED:
     ext()

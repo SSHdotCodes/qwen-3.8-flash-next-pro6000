@@ -776,7 +776,7 @@ class DefaultModelLoader(BaseModelLoader):
                     return
 
         if (
-            getattr(model_config.hf_config, "redhat_streamed_load", False)
+            getattr(model_config.hf_config, "vega_redhat_streamed_load", False)
             and model.__class__.__name__ == "Qwen4ExpForConditionalGeneration"
             and not getattr(model, "secondary_weights", ())
         ):

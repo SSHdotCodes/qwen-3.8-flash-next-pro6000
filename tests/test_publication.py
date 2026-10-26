@@ -2,9 +2,11 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -68,6 +70,14 @@ class LauncherTests(unittest.TestCase):
             "QWENFAST_W8M=1",
             "QWENFAST_W8M_PDL=1",
             "QWENFAST_HCCOMB=1",
+            "QWEN_MTP_A16=/opt/qwen-draft-a16.pt",
+            "QWENFAST_HC_WP=1",
+            "QWENFAST_ATTN=1",
+            "QWENFAST_HEAD_SCREEN=1",
+            "QWEN_MTP_HOT_SCREEN2=1",
+            "QWENFAST_GDNOUT_WP=1",
+            "QWENFAST_GDNOUT_VARIANT=replay",
+            "QWENFAST_GDN_REPLAY=1",
         ):
             self.assertIn(env, args)
         self.assertNotIn("--network", args)
@@ -76,6 +86,35 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("/tmp/model cache:/tmp/model cache:ro", args)
         self.assertIn(
             "/tmp/views/c8f2fb1b9869f686b214782036123b10ff96d14a:/opt/redhat-model:ro", args
+        )
+        self.assertIn(
+            "/tmp/views/c8f2fb1b9869f686b214782036123b10ff96d14a/draft-a16.pt:/opt/qwen-draft-a16.pt:ro", args
+        )
+
+    def test_installed_kern2_environment_and_flags(self):
+        args = shlex.split(self.command().stdout)
+        manifest = json.loads((ROOT / "serve/runtime.json").read_text())
+        environment = dict(args[i + 1].split("=", 1) for i, value in enumerate(args) if value == "-e")
+        self.assertEqual(environment, manifest["environment"])
+
+        def flags(argv):
+            result = {}
+            i = 0
+            while i < len(argv):
+                key = argv[i]
+                self.assertTrue(key.startswith("--"), key)
+                self.assertNotIn(key, result)
+                if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+                    result[key] = argv[i + 1]
+                    i += 2
+                else:
+                    result[key] = True
+                    i += 1
+            return result
+
+        self.assertEqual(
+            flags(args[args.index("sglang.launch_server") + 1:]),
+            flags(manifest["server_args"]),
         )
 
     def test_port_override_and_rejection(self):
@@ -87,6 +126,40 @@ class LauncherTests(unittest.TestCase):
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_prepared_views_enable_the_installed_loader(self):
+        spec = importlib.util.spec_from_file_location("prepare_model", ROOT / "serve/prepare-model.py")
+        prepare_model = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(prepare_model)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "snapshot"
+            source.mkdir()
+            config = {
+                "text_config": {"layer_types": ["qwen_sparse_attention", "linear_attention"]},
+                "quantization_config": {"ignore": []},
+            }
+            index = {"metadata": {"total_size": 100}, "weight_map": {
+                "model.layers.0.weight": "model.safetensors", "mtp.layers.0.weight": "model.safetensors",
+            }}
+            (source / "config.json").write_text(json.dumps(config))
+            (source / "model.safetensors.index.json").write_text(json.dumps(index))
+            (source / "model.safetensors").write_bytes(b"synthetic fixture")
+            for kind in ("target", "draft"):
+                dest = Path(directory) / kind
+                prepare_model.write_view(source, dest, kind)
+                view = json.loads((dest / "config.json").read_text())
+                self.assertEqual(view["text_config"]["layer_types"], ["full_attention", "linear_attention"])
+                self.assertTrue((dest / "model.safetensors").is_symlink())
+                if kind == "target":
+                    self.assertTrue(view["vega_redhat_streamed_load"])
+                    self.assertEqual(view["text_config"]["ple_embedding_dtype"], "bfloat16")
+                    self.assertIn('"vega_redhat_streamed_load", False',
+                                  (ROOT / "serve/overlays/sglang/srt/model_loader/loader.py").read_text())
+                else:
+                    self.assertNotIn("quantization_config", view)
+                    draft_index = json.loads((dest / "model.safetensors.index.json").read_text())
+                    self.assertEqual(set(draft_index["weight_map"]), {"mtp.layers.0.weight"})
+            self.assertEqual(json.loads((source / "config.json").read_text()), config)
+
     def test_export_checksums(self):
         subprocess.run(
             [sys.executable, str(ROOT / "serve/verify-runtime.py")], check=True
@@ -100,19 +173,52 @@ class EvidenceTests(unittest.TestCase):
         spec.loader.exec_module(verify_runtime)
         sources = verify_runtime.build_sources(ROOT / "serve/qwenfast/build_qf.py")
         manifest = json.loads((ROOT / "serve/runtime.json").read_text())
-        self.assertEqual(
-            set(sources), set(manifest["qwenfast"]["sources"]) - {"build_qf.py"}
-        )
+        self.assertEqual(sources, manifest["qwenfast"]["compilation_units"])
+        self.assertTrue(set(sources).issubset(manifest["qwenfast"]["sources"]))
         self.assertIn("qf_a16moe.cu", sources)
         # qfa16_bind.cpp is the standalone binding for test_a16moe.py; qwenfast.so has one module.
         self.assertNotIn("qfa16_bind.cpp", sources)
         self.assertTrue((ROOT / "serve/qwenfast/qfa16_bind.cpp").is_file())
-        bindings = [
-            name
-            for name in sources
-            if "PYBIND11_MODULE" in (ROOT / "serve/qwenfast" / name).read_text()
-        ]
+        self.assertIn("gdn_replay_update.cuh", manifest["qwenfast"]["sources"])
+        for name in ("gdn_replay.cu", "head_run.cpp", "qf_drafthead_hier.cu", "qf_gdnout_new.cu"):
+            self.assertIn(name, sources)
+        bindings = []
+        for name in sources:
+            text = (ROOT / "serve/qwenfast" / name).read_text()
+            # head_run.cpp has a disabled standalone module for its original WP test.
+            if name == "head_run.cpp":
+                self.assertIn("#ifdef WP_HEAD_STANDALONE", text)
+                text = re.sub(r"#ifdef WP_HEAD_STANDALONE\b.*?#endif", "", text, flags=re.S)
+            if re.search(r"^\s*PYBIND11_MODULE\s*\(", text, re.M):
+                bindings.append(name)
         self.assertEqual(bindings, ["qf_bind.cpp"])
+
+    def test_kern2_timings_and_no_carried_forward_kld(self):
+        data = json.loads((ROOT / "results/20261020/decode-summary.json").read_text())
+        self.assertEqual(len(data["rows"]), 8)
+        self.assertEqual({r["completion_tokens"] for r in data["rows"]}, {4096})
+        self.assertEqual({r["finish_reason"] for r in data["rows"]}, {"length"})
+        rates = []
+        for profile in ("code", "agent", "prose", "chinese"):
+            rows = [r for r in data["rows"] if r["profile"] == profile]
+            self.assertEqual({r["run"] for r in rows}, {0, 1})
+            rates.append(sum(r["decode_tok_s"] for r in rows) / 2)
+            for row in rows:
+                self.assertAlmostEqual(
+                    row["decode_tok_s"],
+                    (row["completion_tokens"] - 1) / (row["elapsed_s"] - row["ttft_s"]),
+                )
+                self.assertNotIn("content", row)
+                self.assertNotIn("reasoning", row)
+        self.assertAlmostEqual(sum(rates) / 4, data["mean_decode_tok_s"])
+        self.assertEqual(round(data["mean_decode_tok_s"], 1), 303.8)
+        self.assertIsNone(data["decode_path_kld"])
+
+    def test_draft_preparation_help_is_cpu_only(self):
+        subprocess.run(
+            [sys.executable, str(ROOT / "serve/prepare-draft-a16.py"), "--help"],
+            check=True, capture_output=True,
+        )
 
     def test_october_10_kld_data(self):
         directory = ROOT / "results/20261010/kld"

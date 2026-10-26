@@ -69,6 +69,8 @@ class ShortlistDraftLogitsProcessor(LogitsProcessor):
         # Unsupported heads keep the original path, including initial model
         # profiling before the unquantized target head is shared with the draft.
         pk = getattr(lm_head, "_qf_pk", None)
+        from sglang.srt.qwenfast import draft_cand_clear
+        draft_cand_clear()
         if (not hasattr(lm_head, "weight")
             or lm_head.weight.dtype not in (torch.bfloat16, torch.float16)
             or (pk is None and lm_head.weight.shape[0] != 248320)
@@ -103,6 +105,7 @@ class ShortlistDraftLogitsProcessor(LogitsProcessor):
                     self.hot_q = torch.round(hot.float() / self.hot_scale[:, None]).clamp_(-127, 127).to(torch.int8).contiguous()
                     self.hot_weight = None
                     self.hot_q4 = self.hot_s4 = None
+                    self.hot_q2 = self.hot_s2 = None
                     if _HOT_SCREEN and hot.shape[1] == 2560:
                         xg = hot.float().view(hot.shape[0], 40, 64)
                         s4 = (xg.abs().amax(2) / 7.0).clamp_min_(1e-30).to(torch.bfloat16)
@@ -110,6 +113,8 @@ class ShortlistDraftLogitsProcessor(LogitsProcessor):
                         self.hot_q4 = (q[:, 0::2] | (q[:, 1::2] << 4)).contiguous()
                         self.hot_s4 = s4.contiguous()
                         del xg, q, s4
+                        from sglang.srt.qwenfast import drafthead_make_q2
+                        self.hot_q2, self.hot_s2 = drafthead_make_q2(hot)
                         logger.info("Draft hot head screening: INT4 copy %s", tuple(self.hot_q4.shape))
                     del hot, amax
                     logger.info("Draft hot head stored as INT8 per-row: %s", tuple(self.hot_q.shape))
@@ -121,9 +126,13 @@ class ShortlistDraftLogitsProcessor(LogitsProcessor):
                     and h.dtype == torch.bfloat16 and logits.dtype == torch.bfloat16):
                 from sglang.srt.qwenfast import ext
                 hc = h.contiguous()
-                _, cidx = ext().topk_rows(ext().w4g_gemm(hc, self.hot_q4, self.hot_s4), 64)
+                from sglang.srt.qwenfast import drafthead_candidates
+                _, cidx = drafthead_candidates(hc, self.hot_q4, self.hot_s4,
+                                               getattr(self, "hot_q2", None), getattr(self, "hot_s2", None))
                 exact = ext().rows_dot_i8(hc, self.hot_q, self.hot_scale, cidx)
                 logits.scatter_(1, self.hot_ids[cidx], exact.to(logits.dtype))
+                from sglang.srt.qwenfast import draft_cand_register
+                draft_cand_register(logits, exact, cidx, self.hot_ids)
                 return logits
             if self.hot_weight is None:
                 from sglang.srt.qwenfast import ext
@@ -366,6 +375,38 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
                 logger.info("draft module %s %s qm=%s w=%s %s", name, type(mod).__name__,
                             type(getattr(mod, "quant_method", None)).__name__, tuple(w.shape), w.dtype)
 
+    def _qf_draft_fast(self):
+        """Draft-only decode copies, made once outside graph capture (precision changes acceptance only):
+        QWEN_MTP_A16=path  routed experts as Marlin NVFP4 + shared expert as w8g INT8 (draft/convert.py output) for
+                           qwenfast's persistent a16 MoE kernel at <= 8 rows; the FP8 experts stay for prefill calls
+        QWEN_MTP_HC8=1     hyper-connection mix weights as w8g INT8 (BF16 parameters become the dequantized values)"""
+        if getattr(self, "_qf_fast_done", False) or torch.cuda.is_current_stream_capturing():
+            return
+        self._qf_fast_done = True
+        from sglang.srt import qwenfast as qfm
+        path = os.environ.get("QWEN_MTP_A16")
+        if path and not any(hasattr(getattr(m, "experts", None), "_qf_a16") for m in self.model.modules()):
+            d = torch.load(path, map_location="cuda")
+            blocks = [m for m in self.model.modules() if hasattr(m, "experts") and hasattr(m, "shared_expert_gate")]
+            for b in blocks:
+                b.experts._qf_a16 = (d["w13"], d["s13"], d["g13"], d["w2"], d["s2"], d["g2"])
+                b._qf_a16sh = (d["sq1"], d["ss1"], d["sq2"], d["ss2"])
+            logger.info("Draft a16 MoE: NVFP4 experts + INT8 shared expert from %s for %d blocks", path, len(blocks))
+        if os.environ.get("QWEN_MTP_HC8", "0") == "1":
+            from sglang.srt.layers import hyperconnection as hcm
+            n = 0
+            for mod in self.model.modules():
+                if not (isinstance(mod, hcm.GatedResidual) and hasattr(mod, "input_mix_weight_down")):
+                    continue
+                wd, wu = mod.input_mix_weight_down.weight, mod.input_mix_weight_up.weight
+                if wd.dtype == torch.bfloat16 and tuple(wd.shape) == (320, 10240) and tuple(wu.shape) == (10240, 320):
+                    pd, pu = qfm.w8_quant(wd.data), qfm.w8_quant(wu.data)
+                    qfm.ext().w8g_unpack(pd["q"], pd["s"], wd.data)
+                    qfm.ext().w8g_unpack(pu["q"], pu["s"], wu.data)
+                    mod._qf_w8hc = (pd["q"], pd["s"], pu["q"], pu["s"])
+                    n += 1
+            logger.info("Draft hyper-connection mix weights as w8g INT8: %d modules", n)
+
     @torch.no_grad()
     def forward(
         self,
@@ -376,6 +417,7 @@ class Qwen4ExpForCausalLMMTP(Qwen3_5ForCausalLMMTP):
         **kwargs,
     ):
         self._qf_int8_linears()
+        self._qf_draft_fast()
         with self._npu_quant_context():
             input_embeds = self._prepare_input_embeds(
                 input_ids, forward_batch, input_embeds

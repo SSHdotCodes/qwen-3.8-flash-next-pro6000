@@ -2320,3 +2320,23 @@ class Qwen4ExpForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
 
 EntryClass = [Qwen4ExpForConditionalGeneration]
+
+# WP-Attn: install only after this module has defined its model classes.
+import os as _wp_attn_os
+if (_wp_attn_os.environ.get("QWENFAST_ATTN", "0") == "1"
+        and _wp_attn_os.environ.get("QWENFAST", "1") == "1"):
+    from sglang.srt.glue_attn import install as _wp_attn_install
+    from sglang.srt.glue_index import (
+        install_index_prep as _wp_attn_index_install,
+        install_index_mqa as _wp_attn_mqa_install,
+        install_index_linear as _wp_attn_linear_install,
+        install_cached_row_starts as _wp_attn_zero_install,
+    )
+    from sglang.srt.glue_ple import install_ple as _wp_attn_ple_install
+    from sglang.srt import qwenfast as _wp_attn_qf
+    _wp_attn_install()
+    _wp_attn_zero_install()
+    _wp_attn_ple_install()
+    _wp_attn_index_install(_wp_attn_qf.ext())
+    _wp_attn_mqa_install(_wp_attn_qf.ext())
+    _wp_attn_linear_install(_wp_attn_qf.ext())

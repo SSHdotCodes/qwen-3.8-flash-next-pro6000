@@ -7,6 +7,7 @@ import hashlib
 import importlib.metadata
 import json
 from pathlib import Path
+import re
 
 
 def build_sources(path):
@@ -19,7 +20,7 @@ def build_sources(path):
     raise ValueError(f"No SRC list in {path}")
 
 
-def verify(installed=False):
+def verify(installed=False, draft_a16=None):
     root = Path(__file__).resolve().parent
     manifest = json.loads((root / "runtime.json").read_text())
     for entry in manifest["files"]:
@@ -39,11 +40,27 @@ def verify(installed=False):
         path = source_dir / name
         if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
             raise ValueError(f"Kernel source checksum mismatch: {path}")
-    # Every file compiled into qwenfast.so must be pinned in runtime.json, and vice versa.
-    if set(build_sources(source_dir / "build_qf.py")) != set(kernels["sources"]) - {
-        "build_qf.py"
-    }:
+    # Pin compilation units separately from headers and optional standalone test bindings.
+    units = build_sources(source_dir / "build_qf.py")
+    if units != kernels["compilation_units"] or len(units) != len(set(units)):
         raise ValueError("build_qf.py sources do not match runtime.json")
+    if not set(units).issubset(kernels["sources"]):
+        raise ValueError("Unpinned kernel compilation unit")
+    for name in kernels["sources"]:
+        for header in re.findall(r'^\s*#include\s+"([^"]+)"', (source_dir / name).read_text(), re.M):
+            if header not in kernels["sources"]:
+                raise ValueError(f"Unpinned kernel header: {header}")
+    recipe = root / manifest["draft_a16"]["preparation"]
+    if hashlib.sha256(recipe.read_bytes()).hexdigest() != manifest["draft_a16"]["preparation_sha256"]:
+        raise ValueError("Draft preparation checksum mismatch")
+    ast.parse(recipe.read_bytes(), filename=str(recipe))
+    # These are reference bytes, not a promised hash for a recompiled extension or
+    # re-serialized torch artifact. Check a copied measured artifact only on request.
+    if draft_a16 is not None:
+        with Path(draft_a16).open("rb") as handle:
+            actual = hashlib.file_digest(handle, "sha256").hexdigest()
+        if actual != manifest["draft_a16"]["measured_sha256"]:
+            raise ValueError("Draft A16 differs from the measured artifact")
     if installed and not Path(kernels["library"]).is_file():
         raise ValueError(f"Missing compiled kernels: {kernels['library']}")
     token_path = (
@@ -74,4 +91,6 @@ def verify(installed=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--installed", action="store_true")
-    verify(parser.parse_args().installed)
+    parser.add_argument("--draft-a16", type=Path, help="Also check a copied measured artifact's exact file hash")
+    args = parser.parse_args()
+    verify(args.installed, args.draft_a16)

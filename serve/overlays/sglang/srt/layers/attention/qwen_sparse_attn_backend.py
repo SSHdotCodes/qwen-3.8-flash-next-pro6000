@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from copy import copy
 from functools import lru_cache
 from typing import Dict, Optional, Tuple
@@ -1757,6 +1758,8 @@ class QwenSparseMultiStepDraftBackend:
 
         num_padding = getattr(forward_batch, "num_padding", None)
         num_padding = num_padding if num_padding is not None else 0
+        if self._replay_fused(forward_batch, num_padding):
+            return
         for step, backend in enumerate(self.attn_backends):
             step_batch = self._make_step_forward_batch(
                 forward_batch, step, num_padding=num_padding
@@ -1773,6 +1776,74 @@ class QwenSparseMultiStepDraftBackend:
 
     def init_forward_metadata_in_graph(self, forward_batch) -> None:
         pass
+
+    def _replay_fused(self, forward_batch, num_padding: int) -> bool:
+        """WP-Spec: every draft step's graph metadata in one launch. Step i reads (seq_lens + i + 1) as int32 with
+        padded rows at length 1, exactly what _make_step_forward_batch hands _replay_cuda_graph_metadata, so
+        the buffers end up identical; returns False (nothing launched) whenever the per-step path is needed."""
+        from sglang.srt.layers.attention.qsa.graph_metadata import (
+            launch_graph_metadata_fused,
+        )
+
+        seq_lens = forward_batch.seq_lens
+        bs = int(seq_lens.numel())
+        if bs <= 0 or not 1 <= len(self.attn_backends) <= 2 or not seq_lens.is_cuda:
+            return False
+        metadatas = []
+        for backend in self.attn_backends:
+            metadata = backend._cuda_graph_metadata.get((ForwardMode.DECODE, bs))
+            if metadata is None or not backend._can_replay_with_gpu_kernels(
+                metadata, seq_lens
+            ):
+                return False
+            metadatas.append(metadata)
+        backend = self.attn_backends[0]
+        if any(b.req_to_token is not backend.req_to_token for b in self.attn_backends):
+            return False
+        if not launch_graph_metadata_fused(
+            mode=0,
+            bs=bs,
+            num_rows=bs,
+            seq_lens=seq_lens,
+            req_pool_indices=forward_batch.req_pool_indices,
+            extend_lens=None,
+            extend_len=0,
+            num_padding=max(0, min(int(num_padding), bs)),
+            metadatas=metadatas,
+            seq_adds=[step + 1 for step in range(len(metadatas))],
+            req_to_token=backend.req_to_token,
+            pool=metadatas[0].indexer_metadata.token_to_kv_pool,
+        ):
+            return False
+        for b, metadata in zip(self.attn_backends, metadatas):
+            b.forward_metadata = metadata
+        if os.environ.get("QWEN_SPEC_CHECK", "0") == "1":
+            from sglang.srt.layers.attention.qsa.graph_metadata import _meta_buffers
+            from sglang.srt.speculative import spec_fused
+
+            fused = [[t.clone() for t in _meta_buffers(m)] for m in metadatas]
+            for step, b in enumerate(self.attn_backends):
+                step_batch = self._make_step_forward_batch(
+                    forward_batch, step, num_padding=num_padding
+                )
+                b._replay_cuda_graph_metadata(
+                    bs=step_batch.batch_size,
+                    req_pool_indices=step_batch.req_pool_indices,
+                    seq_lens=step_batch.seq_lens,
+                    forward_mode=ForwardMode.DECODE,
+                    spec_info=step_batch.spec_info,
+                    seq_lens_cpu=step_batch.seq_lens_cpu,
+                    num_padding=num_padding,
+                )
+            spec_fused.check(
+                "qsa_meta_draft_steps",
+                all(
+                    torch.equal(x, y)
+                    for f, m in zip(fused, metadatas)
+                    for x, y in zip(f, _meta_buffers(m))
+                ),
+            )
+        return True
 
 
 __all__ = [
