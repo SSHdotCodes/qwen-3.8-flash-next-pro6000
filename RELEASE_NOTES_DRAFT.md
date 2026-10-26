@@ -1,7 +1,7 @@
 # Release preparation draft: October 20 kern2
 
-Local packaging only. No push, PR, publication, model download, GPU execution or workstation change
-was performed during this preparation. The October 10 release remains the comparison baseline.
+Local packaging plus an interrupted CPU-only image-build attempt. No push, PR, publication, model
+weight download or GPU execution was performed. The October 10 release remains the comparison baseline.
 
 The packaged runtime is the installed October 20 `i12` configuration: recorded **303.8 tok/s** and
 **125.2 verify steps/s**. [The public report](results/20261020/REPORT.md) explains the measurement and
@@ -25,6 +25,46 @@ Do not carry the October 10 KLD into the October 20 release-table cell.
 - `decode-summary.json` reproduces the eight-run, four-profile 303.7750964 tok/s mean using timings only.
 - Third-party notices and original source headers are retained; no weights, private activation captures,
   owner sessions, private prompts, raw generated benchmark text or workstation unit are included.
+
+## CPU image-build attempt stopped on October 26
+
+**Do not restart automatically. Never build while a Qwen server is running; it pins ~102 GB host RAM.**
+
+The owner stopped the build at 04:53 EDT (08:53 UTC) after parallel compiler processes, reported at
+about 2.2 GB RSS each, competed with the running server's pinned host memory. The owner reported that
+the kernel OOM killer terminated the server scheduler mid-benchmark. CPU-only execution, nice 19,
+idle I/O and MAX_JOBS=8 did not bound host RAM sufficiently. Future parallelism must be selected from
+free host RAM, in a window with no Qwen server running.
+
+The build reached **Dockerfile step [6/8], compiling qwenfast via build_qf.py**. Dependency repair and
+its `pip check` completed successfully (`No broken requirements found.`); the overlay/hot-map/source
+COPY steps completed. Compilation was canceled before copying the verifier/preparation script and
+before `verify-runtime.py --installed`, final image export or throwaway final-image verification.
+The supervisor recorded exit **-15**, end **08:53:32 UTC**, elapsed **190 s**. No final image digest or
+installed-verifier result is available. Minimum observed free disk was **151,583,707,136 bytes**, above
+the 120 GB floor. The build directory and BuildKit cache were retained without cleanup.
+
+An earlier attempt stopped before compilation because `.dockerignore` excluded `prepare-draft-a16.py`;
+that allowlist is fixed. The Dockerfile now lowers compiler CPU/I/O priority inside the build as well
+as in the host wrapper. Neither change makes concurrent model serving safe.
+
+Resume manually from the retained build checkout's `repo` directory, **only after all Qwen servers
+are stopped**, with `MAX_JOBS` chosen from available RAM. This reuses BuildKit cache and only the test tag:
+
+```bash
+: "${MAX_JOBS:?set MAX_JOBS from free host RAM before resuming}"
+IMAGE=qwen38-flash-next-public:oct20-kern2-test MAX_JOBS="$MAX_JOBS" \
+  nice -n 19 ionice -c3 bash serve/build-image.sh
+```
+
+The retained build supervisor hard-codes eight jobs; do not rerun it unchanged. Recheck the 120 GB
+disk floor separately. After a successful build, run the final-image checks in a GPU-invisible,
+no-port throwaway container. This Docker CLI rejects literal `--gpus none`; use runtime `runc`, no GPU
+device requests, `NVIDIA_VISIBLE_DEVICES=void` and an empty `CUDA_VISIBLE_DEVICES` instead.
+
+Draft-A16 preparation **requires a GPU** (CUDA tensors, Marlin repacking and A16 kernel validation).
+It was not run; no new artifact or tensor hashes were produced or compared with the installed artifact.
+The known measured artifact digest remains a reference, not a new CPU reproduction.
 
 ## Needs GPU verification
 

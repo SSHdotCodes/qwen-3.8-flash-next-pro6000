@@ -15,8 +15,11 @@ COPY overlays/hot-token-ids.json /opt/qwen-mtp-hotmap.json
 # image's PyTorch and CUDA 13.0 toolkit for SM120a; no GPU is needed to build.
 COPY qwenfast/ /opt/qwenfast/src/
 ARG MAX_JOBS=8
-RUN cd /opt/qwenfast/src && MAX_JOBS=$MAX_JOBS python3 build_qf.py && \
-    cp build_qf/qwenfast.so /opt/qwenfast/qwenfast.so
+# Lower compiler CPU/I/O priority even though Docker's daemon does not inherit
+# the invoking client's niceness. Explicit architecture flags need no GPU.
+RUN env NVIDIA_VISIBLE_DEVICES=void CUDA_VISIBLE_DEVICES= \
+    nice -n 19 ionice -c3 sh -c 'cd /opt/qwenfast/src && \
+    MAX_JOBS=$MAX_JOBS python3 build_qf.py && cp build_qf/qwenfast.so /opt/qwenfast/qwenfast.so'
 COPY runtime.json verify-runtime.py prepare-draft-a16.py /opt/flash-next/
 RUN python3 /opt/flash-next/verify-runtime.py --installed
 
