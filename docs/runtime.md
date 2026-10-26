@@ -199,8 +199,8 @@ Kernel tests for these paths (GPU, inside the image):
 ## October 20 kern2
 
 The [October 20 report](../results/20261020/REPORT.md) records 303.8 tok/s and 125.2 verify steps/s.
-**Decode-path KLD was not re-measured.** The public checkout build, regenerated draft artifact and
-ported GPU suites still need verification; see [the draft checklist](../RELEASE_NOTES_DRAFT.md).
+**Decode-path KLD was not re-measured.** The public image build and the regenerated draft artifact were
+checked on October 26 ([report](../results/20261026/REPORT.md)); the ported GPU kernel suites were not run.
 
 Of the 27 Python overlays and hot map, **26 files match the measured installed manifest byte for byte**.
 Two overlay files have the intentional public/installed differences listed below. The public target

@@ -10,7 +10,7 @@ also not run because their reference data was unavailable.
 
 This release packages the installed runtime's source files and launch settings. The measurements below
 are the recorded workstation results, not a new test of an image built from this public checkout.
-That public build and its GPU checks remain pending in [RELEASE_NOTES_DRAFT.md](../../RELEASE_NOTES_DRAFT.md).
+The public image built from this checkout was checked on October 26; see the [October 26 report](../20261026/REPORT.md).
 
 ## Measurement method
 
@@ -191,10 +191,5 @@ No model weights or compiled library are redistributed. `serve/prepare-draft-a16
 the draft artifact on an idle GPU from the pinned model. Its parameterized recipe uses synthetic
 validation rather than private captures. Torch serialization may yield a different file hash; neither
 binary equality nor model-level quality of the regenerated artifact is established by this release
-preparation. See the draft notes for the required checks before publication.
-
-## TODO: October 26 update
-
-**Placeholder only. No October 26 runtime, benchmark or quality claim is made here.** The orchestrator
-will add tonight's measured configuration, methods, results, KLD/copy-probe status and GPU verification
-outcome, and replace the TODO release-table row after its work finishes.
+preparation. On October 26 the regenerated artifact proved tensor-identical to the measured one
+([report](../20261026/REPORT.md)).

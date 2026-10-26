@@ -1,0 +1,11 @@
+{
+  "_metadata": {
+    "flashinfer_version": "0.6.18",
+    "cuda_version": "13.0",
+    "cublas_version": "13.1.1",
+    "cudnn_version": "92000",
+    "cudnn_frontend_version": "1.30.0",
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"
+  },
+  "_generation": "0549d3f7c832a3b104d3b2ecb9d29f97c663a372d0ecd05c1953bb89a66ab396"
+}

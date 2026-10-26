@@ -73,5 +73,9 @@ if [[ ! -f "$DRAFT_A16" ]]; then
   echo 'Draft A16 artifact missing. Run ./serve/prepare-draft-a16.sh first.' >&2; exit 1
 fi
 mkdir -p "$RUNTIME_CACHE/triton" "$RUNTIME_CACHE/sglang" "$RUNTIME_CACHE/tilelang"
+# FlashInfer's tuned fused-MoE tactics for this GPU and library stack. Without them a fresh cache uses default
+# tactics and prefill is ~6% slower (results/20261026). Existing entries are never overwritten.
+mkdir -p "$RUNTIME_CACHE/sglang/flashinfer/autotune"
+cp -rn "$HERE/tuning/flashinfer-autotune/." "$RUNTIME_CACHE/sglang/flashinfer/autotune/"
 # Container networking is isolated. Only the HTTP port is published, to loopback.
 exec "${command[@]}"

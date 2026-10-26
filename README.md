@@ -7,8 +7,9 @@ RedHatAI NVFP4 checkpoint, **262,144-token context**, two request slots, a
 The October 20 **kern2** runtime records **303.8 tok/s and 125.2 verify steps/s**, up from
 259.4 tok/s and 111.1 steps/s for the October 10 installed control measured in the same round.
 It adds draft A16 experts, HC/QSA/head/speculative bookkeeping improvements and paired GDN replay/output
-kernels. **Decode-path KLD was not re-measured for kern2.** The public image build and GPU reproduction
-remain pending; see [release draft checks](RELEASE_NOTES_DRAFT.md).
+kernels. **Decode-path KLD was not re-measured for kern2.** On October 26 the image built from this checkout
+reproduced the installed runtime's decode rate after a restart (125.0 verify steps/s) and, with the FlashInfer tuning
+now shipped in `serve/tuning/`, its prefill after one full run and a restart; see the [October 26 report](results/20261026/REPORT.md).
 
 The October 10 public image measured 264.5 tok/s and 111.0 verify steps/s, with decode-path KLD
 0.011127 against BF16. Those are historical October 10 measurements, not kern2 quality evidence.
@@ -26,7 +27,7 @@ ones. The agent tool-use bench rose from 105 to 112 of 120.
 | October 9: W4A16 routed experts | 243.4 | 100.8 | 0.0111 | 2.37 s | [Oct 9](results/20261009/REPORT.md) |
 | **October 10: persistent W4A16 MoE, tensor-core INT8 GEMM, fused HC combine** | **264.5** | **111.0** (same-day baseline 102.0) | **0.0111** | | [Oct 10](results/20261010/REPORT.md) |
 | **October 20: kern2 (current packaged runtime)** | **303.8** | **125.2** (same-round control 111.1) | **Not re-measured** | Not re-measured at 32K | [Oct 20](results/20261020/REPORT.md) |
-| **October 26: TODO, awaiting GPU work** | TODO | TODO | TODO | TODO | [Draft placeholder](RELEASE_NOTES_DRAFT.md#todo-october-26-update) |
+| October 26: public image built from this checkout (kern2 runtime unchanged) | 291.3 | 125.0 (installed 125.0) | Not re-measured | 2.38 s (installed 2.37 s) | [Oct 26](results/20261026/REPORT.md) |
 
 Decode protocol: `bench/decode_bench.py`, single requests of 4,096 generated tokens
 including reasoning, four profiles (code, agent, prose, Chinese), `xhigh`,
@@ -122,7 +123,9 @@ starting Docker.
 **The first start is slower.** It compiles and tunes Triton/Inductor kernels into `RUNTIME_CACHE`. Loading took about
 6 minutes. In the October 9 release check, that first server run also decoded about 4% slower: 96.5 verify steps/s against
 100.7. After a restart with the populated cache it measured 240.9 tok/s and 100.7 steps/s, matching the measured
-workstation's 100.8. Restart once after the first start before comparing numbers.
+workstation's 100.8. Prefill settles the same way: in the October 26 check an empty cache measured 2.45 s at 32K
+until one full benchmark run and a restart, then 2.38 s. `run-server.sh` also seeds FlashInfer's tuned MoE tactics
+from `serve/tuning/`; without them prefill stayed about 6% slower. Run one full workload and restart before comparing numbers.
 
 For systemd, clone to `~/qwen-3.8-flash-next-pro6000`, build, download and prepare the draft artifact first,
 then install the [user unit](serve/qwen38-flash-next-sglang.service):
@@ -199,8 +202,9 @@ The kernel sources/bindings, unchanged draft token map and 25 of 27 Python overl
 kern2 files byte for byte. Two overlays intentionally differ: a coordinated public config-key rename
 and a comment edit, listed in the [public/installed differences](docs/runtime.md#intentional-publicinstalled-differences). `serve/runtime.json` pins 26 compilation units plus the build script, header
 and optional support sources. The image compiles the extension itself, so library bytes may differ
-from the recorded workstation binary. The October 20 public image has **not** been rebuilt or GPU-tested
-as part of packaging; the [release draft](RELEASE_NOTES_DRAFT.md) lists the remaining checks.
+from the recorded workstation binary. The October 26 check built this image, regenerated the draft A16 artifact
+(tensor-identical to the measured one) and reran the decode and prefill benchmarks; the
+[October 26 report](results/20261026/REPORT.md) lists what was and was not re-verified.
 
 The target screen uses a sigma bound tested on 602 captured inputs. Candidate logits were bitwise equal
 and top-k sets matched there; fresh workloads still need an omission audit. Requests with logprobs,
